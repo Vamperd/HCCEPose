@@ -25,15 +25,37 @@ demo-bin-picking
 ```
 '''
 
+import argparse
+import os
 import torch
 from HccePose.bop_loader import bop_dataset, rendering_bop_dataset_back_front
+
+
+def resolve_dataset_path(dataset_path):
+    if os.path.isabs(dataset_path):
+        return dataset_path
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), dataset_path)
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description='Generate HccePose BF front/back labels.')
+    parser.add_argument(
+        '--dataset-path',
+        default='dji-action4',
+        help='Dataset folder containing models/ and train_pbr/. Relative paths are resolved from the repo root.',
+    )
+    parser.add_argument('--folder-name', default='train_pbr', help='BOP split folder inside the dataset.')
+    parser.add_argument('--batch-size', default=16, type=int, help='Batch size for label rendering.')
+    parser.add_argument('--num-workers', default=16, type=int, help='DataLoader worker count.')
+    return parser.parse_args()
 
 
 if __name__ == '__main__':
     
     # Specify the path to the dataset folder.
     # 指定数据集文件夹的路径。
-    dataset_path = '/root/xxxxxx/demo-bin-picking'
+    args = parse_args()
+    dataset_path = resolve_dataset_path(args.dataset_path)
     
     # Create an instance for loading the BOP dataset.
     # 创建一个用于加载 BOP 数据集的实例。
@@ -41,7 +63,7 @@ if __name__ == '__main__':
     
     # Specify a folder within the dataset and load the data from it.
     # 指定数据集中的一个文件夹，并加载该文件夹中的数据。
-    folder_name = 'train_pbr'
+    folder_name = args.folder_name
     rendering_bop_dataset_back_front_item = rendering_bop_dataset_back_front(bop_dataset_item, folder_name)
     
     # Iterate through all object IDs and their 3D model paths to generate label maps of front and back 3D coordinates for each object.
@@ -60,9 +82,9 @@ if __name__ == '__main__':
         # 使用 PyTorch 的多进程机制来加速标签图的渲染。  
         # 如果设备的 CPU 核心数量较多，可通过设置更高的 `num_workers` 来进一步提升标签生成速度。  
         # `worker_init_fn` 会为每个进程创建独立的 VisPy 渲染器，不同进程之间的渲染相互独立，不会产生冲突。
-        batch_size = 16        
-        data_gen_loader = torch.utils.data.DataLoader(rendering_bop_dataset_back_front_item, 
-                                                batch_size=16, shuffle=False, num_workers=16, drop_last=False, 
+        batch_size = args.batch_size
+        data_gen_loader = torch.utils.data.DataLoader(rendering_bop_dataset_back_front_item,
+                                                batch_size=batch_size, shuffle=False, num_workers=args.num_workers, drop_last=False,
                                                 worker_init_fn=rendering_bop_dataset_back_front_item.worker_init_fn)
         for batch_idx, (cc_) in enumerate(data_gen_loader):
             if int(batch_idx%5) == 0:

@@ -55,6 +55,35 @@ from HccePose.PnP_solver import solve_PnP, solve_PnP_comb
 from HccePose.metric import add_s
 from kasal.bop_toolkit_lib.inout import load_ply
 
+
+def resolve_dataset_path(dataset_path):
+    if os.path.isabs(dataset_path):
+        return dataset_path
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), dataset_path)
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description='Train HccePose BF weights for a dataset.')
+    parser.add_argument(
+        '--dataset-path',
+        default='dji-action4',
+        help='Dataset folder containing models/, train_pbr/, and generated BF labels.',
+    )
+    parser.add_argument('--folder-name', default='train_pbr', help='BOP split folder used for training.')
+    parser.add_argument('--start-obj-id', default=1, type=int, help='First object id to train.')
+    parser.add_argument('--end-obj-id', default=1, type=int, help='Last object id to train.')
+    parser.add_argument('--total-iteration', default=50001, type=int, help='Total training iterations per object.')
+    parser.add_argument('--batch-size', default=24, type=int, help='Training batch size.')
+    parser.add_argument('--num-workers', default=12, type=int, help='DataLoader worker count.')
+    parser.add_argument(
+        '--ide-debug',
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help='Use single-GPU IDE/debug mode. Pass --no-ide-debug for DDP launch.',
+    )
+    parser.add_argument('--local-rank', '--local_rank', dest='local_rank', default=0, type=int)
+    return parser.parse_args()
+
 def test(obj_ply, obj_info, net: HccePose_BF_Net, test_loader: torch.utils.data.DataLoader):
     net.eval()
     add_list_l = []
@@ -140,26 +169,27 @@ if __name__ == '__main__':
     nohup python -u /root/xxxxxx/s4_p2_train_bf_pbr.py > log4.file 2>&1 &
     '''
     
-    ide_debug = True
+    args = parse_args()
+    ide_debug = args.ide_debug
     
     # Specify the path to the dataset folder.
     # 指定数据集文件夹的路径。
-    dataset_path = '/root/xxxxxx/demo-tex-objs'
+    dataset_path = resolve_dataset_path(args.dataset_path)
     
     # Specify the name of the subfolder in the dataset used for loading training data.
     # 指定数据集中用于加载训练数据的子文件夹名称。
-    train_folder_name = 'train_pbr'
+    train_folder_name = args.folder_name
     
     # The range of object IDs for training.  
     # `start_obj_id` is the starting object ID, and `end_obj_id` is the ending object ID.
     # 训练的物体 ID 范围。  
     # `start_obj_id` 为起始物体 ID，`end_obj_id` 为终止物体 ID。
-    start_obj_id = 1
-    end_obj_id =5
+    start_obj_id = args.start_obj_id
+    end_obj_id = args.end_obj_id
     
     # Total number of training epochs.
     # 总训练轮数。
-    total_iteration = 50001
+    total_iteration = args.total_iteration
     
     # Learning rate.
     # 学习率。
@@ -167,11 +197,11 @@ if __name__ == '__main__':
     
     # Number of samples per training epoch.
     # 每轮训练的样本数量。
-    batch_size = 24
+    batch_size = args.batch_size
     
     # Number of worker processes used by the DataLoader.
     # DataLoader 的进程数量。
-    num_workers = 12
+    num_workers = args.num_workers
     
     # The number of epochs between saving checkpoints.
     # 保存检查点的间隔轮数。
@@ -185,15 +215,6 @@ if __name__ == '__main__':
     # Whether to enable EfficientNet.
     # 是否启用 EfficientNet。
     efficientnet_key = None
-    
-    
-    
-    parser = argparse.ArgumentParser()
-    if ide_debug:
-        parser.add_argument("--local-rank", default=0, type=int)
-    else:
-        parser.add_argument("--local-rank", default=-1, type=int)
-    args = parser.parse_args()
     if not ide_debug:
         torch.distributed.init_process_group(backend='nccl')
         torch.distributed.barrier() 
@@ -366,4 +387,3 @@ if __name__ == '__main__':
                 if args.local_rank == 0:
                     print('end the training in iteration_step:', iteration_step)
                 break
-             

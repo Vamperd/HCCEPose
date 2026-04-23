@@ -1,9 +1,26 @@
 # Author: Yulin Wang (yulinwang@seu.edu.cn)
 # School of Mechanical Engineering, Southeast University, China
 
+import argparse
 import os
 import numpy as np
 from kasal.utils import load_ply_model, load_json2dict, get_all_ply_obj, write_dict2json
+
+
+def resolve_dataset_path(dataset_path):
+    if os.path.isabs(dataset_path):
+        return dataset_path
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), dataset_path)
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description='Generate BOP models_info.json for a dataset.')
+    parser.add_argument(
+        '--dataset-path',
+        default='dji-action4',
+        help='Dataset folder containing a models directory. Relative paths are resolved from the repo root.',
+    )
+    return parser.parse_args()
 
 if __name__ == '__main__':
     
@@ -14,7 +31,8 @@ if __name__ == '__main__':
     |--- models
         |--- obj_000001.ply
     '''
-    dataset_path = 'demo-bin-picking'
+    args = parse_args()
+    dataset_path = resolve_dataset_path(args.dataset_path)
 
     # Retrieve all PLY files from the folder and its subfolders.
     # 获取该文件夹及其所有子文件夹中的所有PLY文件。
