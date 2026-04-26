@@ -106,6 +106,14 @@ def parse_args() -> argparse.Namespace:
         help="Skip material indices already marked as done in the manifest.",
     )
     parser.add_argument(
+        "--disable-screen-texture",
+        action="store_true",
+        help=(
+            "Do not add a randomized current-material texture to the DJI Action4 "
+            "screen face bounded by corners 1, 2, 5, and 6."
+        ),
+    )
+    parser.add_argument(
         "--list-materials",
         action="store_true",
         help="Print the stable material index mapping and exit.",
@@ -291,6 +299,21 @@ def validate_material_index(material_index: int, materials: list[MaterialEntry])
         )
 
 
+def get_material_color_path(textures_path: Path, material: MaterialEntry) -> Path:
+    if material.loader_kind == "cc0textures-512":
+        color_path = Path(material.payload["c"])
+    elif material.loader_kind == "cc0textures":
+        color_path = textures_path / material.name / f"{material.name}_2K-JPG_Color.jpg"
+    else:
+        raise ValueError(f"Unsupported material loader kind: {material.loader_kind}")
+
+    if not color_path.is_file():
+        raise FileNotFoundError(
+            f"Missing color image for material {material.index} ({material.name}): {color_path}"
+        )
+    return color_path
+
+
 def render_material_scene(
     args: argparse.Namespace,
     material: MaterialEntry,
@@ -299,6 +322,8 @@ def render_material_scene(
     os.environ["EGL_DEVICE_ID"] = str(args.gpu_id)
 
     import blenderproc as bproc
+    import bmesh
+    import bpy
     import numpy as np
 
     bop_dataset_path = str(output_dataset_path)
@@ -362,6 +387,9 @@ def render_material_scene(
     if not cc_materials:
         raise RuntimeError(f"Failed to load material for index {material.index}: {material.name}")
     selected_material = cc_materials[0]
+    screen_texture_path = None
+    if not args.disable_screen_texture:
+        screen_texture_path = get_material_color_path(args.textures_path, material)
 
     object_ids = [args.object_id] * args.object_count
     target_bop_objs = bproc.loader.load_bop_objs(
@@ -376,6 +404,101 @@ def render_material_scene(
         obj.set_location(np.random.uniform(min_xyz, max_xyz))
         obj.set_rotation_euler(bproc.sampler.uniformSO3())
 
+    def get_blender_object(obj: Any) -> Any:
+        if hasattr(obj, "blender_obj"):
+            return obj.blender_obj
+        if hasattr(obj, "get_blender_obj"):
+            return obj.get_blender_obj()
+        raise AttributeError(f"Cannot access the underlying Blender object for {obj!r}")
+
+    def create_screen_material(color_path: Path) -> Any:
+        image = bpy.data.images.load(str(color_path), check_existing=True)
+        material_name = f"dji_screen_{material.index:06d}"
+        screen_material = bpy.data.materials.new(material_name)
+        screen_material.use_nodes = True
+
+        nodes = screen_material.node_tree.nodes
+        links = screen_material.node_tree.links
+        bsdf = nodes.get("Principled BSDF")
+        uv_node = nodes.new(type="ShaderNodeUVMap")
+        uv_node.uv_map = "UVMap"
+        texture_node = nodes.new(type="ShaderNodeTexImage")
+        texture_node.image = image
+        texture_node.extension = "CLIP"
+        texture_node.interpolation = "Linear"
+        links.new(uv_node.outputs["UV"], texture_node.inputs["Vector"])
+        if bsdf is not None:
+            links.new(texture_node.outputs["Color"], bsdf.inputs["Base Color"])
+            if "Roughness" in bsdf.inputs:
+                bsdf.inputs["Roughness"].default_value = 0.35
+            if "Specular IOR Level" in bsdf.inputs:
+                bsdf.inputs["Specular IOR Level"].default_value = 0.2
+            elif "Specular" in bsdf.inputs:
+                bsdf.inputs["Specular"].default_value = 0.2
+        return screen_material
+
+    def randomized_screen_uvs() -> list[tuple[float, float]]:
+        crop_w = float(np.random.uniform(0.35, 1.0))
+        crop_h = float(np.random.uniform(0.35, 1.0))
+        u0 = float(np.random.uniform(0.0, 1.0 - crop_w))
+        v0 = float(np.random.uniform(0.0, 1.0 - crop_h))
+        u1 = u0 + crop_w
+        v1 = v0 + crop_h
+        uvs = [(u0, v0), (u1, v0), (u1, v1), (u0, v1)]
+
+        if random.random() < 0.5:
+            uvs = [(u1 - (u - u0), v) for u, v in uvs]
+        if random.random() < 0.5:
+            uvs = [(u, v1 - (v - v0)) for u, v in uvs]
+        for _ in range(random.randrange(4)):
+            uvs = uvs[1:] + uvs[:1]
+        return uvs
+
+    def add_randomized_screen_face(obj: Any, screen_material: Any) -> None:
+        blender_obj = get_blender_object(obj)
+        mesh = blender_obj.data
+        if mesh is None or len(mesh.vertices) == 0:
+            raise RuntimeError(f"Object {blender_obj.name} has no mesh vertices.")
+
+        blender_obj.data = mesh.copy()
+        mesh = blender_obj.data
+        mesh.materials.append(screen_material)
+        screen_material_index = len(mesh.materials) - 1
+
+        coords = [vertex.co.copy() for vertex in mesh.vertices]
+        min_y = min(coord.y for coord in coords)
+        max_y = max(coord.y for coord in coords)
+        min_z = min(coord.z for coord in coords)
+        max_z = max(coord.z for coord in coords)
+        max_x = max(coord.x for coord in coords)
+        extent = max(
+            max(coord.x for coord in coords) - min(coord.x for coord in coords),
+            max_y - min_y,
+            max_z - min_z,
+        )
+        epsilon = max(extent * 1e-4, 1e-7)
+        x = max_x + epsilon
+
+        bm = bmesh.new()
+        bm.from_mesh(mesh)
+        uv_layer = bm.loops.layers.uv.get("UVMap") or bm.loops.layers.uv.new("UVMap")
+        verts = [
+            bm.verts.new((x, min_y, min_z)),
+            bm.verts.new((x, max_y, min_z)),
+            bm.verts.new((x, max_y, max_z)),
+            bm.verts.new((x, min_y, max_z)),
+        ]
+        bm.verts.ensure_lookup_table()
+        screen_face = bm.faces.new(verts)
+        screen_face.material_index = screen_material_index
+        for loop, uv in zip(screen_face.loops, randomized_screen_uvs()):
+            loop[uv_layer].uv = uv
+        bm.normal_update()
+        bm.to_mesh(mesh)
+        bm.free()
+
+        mesh.update()
+
     bproc.renderer.enable_depth_output(activate_antialiasing=False)
     bproc.renderer.set_max_amount_of_samples(50)
     bproc.renderer.set_render_devices(
@@ -387,7 +510,13 @@ def render_material_scene(
         obj.set_shading_mode("auto")
         obj.hide(True)
 
+    screen_material = None
+    if screen_texture_path is not None:
+        screen_material = create_screen_material(screen_texture_path)
+
     for obj in target_bop_objs:
+        if screen_material is not None:
+            add_randomized_screen_face(obj, screen_material)
         material_slot = obj.get_materials()[0]
         material_slot.set_principled_shader_value("Roughness", np.random.uniform(0.0, 1.0))
         material_slot.set_principled_shader_value("Specular", np.random.uniform(0.0, 1.0))
