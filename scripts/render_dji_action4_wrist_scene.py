@@ -132,6 +132,8 @@ def parse_args() -> argparse.Namespace:
 
 
 def _get_blender_object(obj: Any) -> Any:
+    if hasattr(obj, "type") and hasattr(obj, "matrix_world") and hasattr(obj, "data"):
+        return obj
     if hasattr(obj, "blender_obj"):
         return obj.blender_obj
     if hasattr(obj, "get_blender_obj"):
@@ -158,38 +160,46 @@ def _world_bbox(blender_obj: Any, Vector: Any) -> tuple[Any, Any]:
     return min_corner, max_corner
 
 
+def _bbox_size_vector(obj: Any, Vector: Any, np: Any) -> Any:
+    min_corner, max_corner = _world_bbox(_get_blender_object(obj), Vector)
+    return np.asarray(
+        [
+            max_corner.x - min_corner.x,
+            max_corner.y - min_corner.y,
+            max_corner.z - min_corner.z,
+        ],
+        dtype=float,
+    )
+
+
 def _import_centered_wrist_template(
     wrist_glb: Path,
     wrist_unit_scale: str,
     wrist_size_scale: float,
+    bproc: Any,
     bpy: Any,
     Vector: Any,
 ) -> Any:
     if not wrist_glb.is_file():
         raise FileNotFoundError(f"Missing wrist GLB: {wrist_glb}")
 
-    before_names = {obj.name for obj in bpy.context.scene.objects}
-    bpy.ops.import_scene.gltf(filepath=os.fspath(wrist_glb))
-    imported_meshes = [
-        obj
-        for obj in bpy.context.scene.objects
-        if obj.name not in before_names and obj.type == "MESH"
-    ]
+    imported_meshes = bproc.loader.load_obj(os.fspath(wrist_glb))
     if not imported_meshes:
         raise RuntimeError(f"No mesh objects were imported from {wrist_glb}")
+    if len(imported_meshes) != 1:
+        raise RuntimeError(
+            f"Expected wrist GLB to contain one mesh object, got {len(imported_meshes)}: {wrist_glb}"
+        )
 
+    template = imported_meshes[0]
+    template_blender_obj = _get_blender_object(template)
+    template_blender_obj.name = "wrist_occluder_template"
     bpy.ops.object.select_all(action="DESELECT")
-    for obj in imported_meshes:
-        obj.select_set(True)
-    bpy.context.view_layer.objects.active = imported_meshes[0]
-    if len(imported_meshes) > 1:
-        bpy.ops.object.join()
-
-    template = bpy.context.view_layer.objects.active
-    template.name = "wrist_occluder_template"
+    template_blender_obj.select_set(True)
+    bpy.context.view_layer.objects.active = template_blender_obj
     bpy.ops.object.transform_apply(location=True, rotation=True, scale=True)
 
-    min_corner, max_corner = _world_bbox(template, Vector)
+    min_corner, max_corner = _world_bbox(template_blender_obj, Vector)
     extent = max(max_corner - min_corner)
     if wrist_unit_scale == "auto":
         unit_scale = 0.001 if extent > 2.0 else 1.0
@@ -198,46 +208,86 @@ def _import_centered_wrist_template(
     scale = unit_scale * wrist_size_scale
     center = (min_corner + max_corner) * 0.5
 
-    for vertex in template.data.vertices:
-        world_coord = template.matrix_world @ vertex.co
+    for vertex in template_blender_obj.data.vertices:
+        world_coord = template_blender_obj.matrix_world @ vertex.co
         vertex.co = (world_coord - center) * scale
-    template.matrix_world.identity()
-    template.location = (0.0, 0.0, 0.0)
-    template.rotation_euler = (0.0, 0.0, 0.0)
-    template.scale = (1.0, 1.0, 1.0)
-    template.data.update()
-    template.hide_viewport = True
-    template.hide_render = True
+    template_blender_obj.matrix_world.identity()
+    template_blender_obj.location = (0.0, 0.0, 0.0)
+    template_blender_obj.rotation_euler = (0.0, 0.0, 0.0)
+    template_blender_obj.scale = (1.0, 1.0, 1.0)
+    template_blender_obj.data.update()
+    template.hide(True)
+    template_blender_obj.hide_viewport = True
+    template_blender_obj.hide_set(True)
     return template
 
 
-def _clone_wrist(template: Any, index: int, bpy: Any) -> Any:
-    wrist = template.copy()
-    wrist.data = template.data.copy()
-    wrist.name = f"wrist_occluder_{index:02d}"
-    bpy.context.collection.objects.link(wrist)
-    wrist.hide_viewport = False
-    wrist.hide_render = False
+def _clone_wrist(template: Any, index: int) -> Any:
+    wrist = template.duplicate()
+    wrist_blender_obj = _get_blender_object(wrist)
+    wrist_blender_obj.name = f"wrist_occluder_{index:02d}"
+    wrist.hide(False)
+    wrist_blender_obj.hide_viewport = False
+    wrist_blender_obj.hide_set(False)
     return wrist
 
 
-def _profile_offsets(profile: str, np: Any) -> tuple[float, float, float]:
+def _normalize_wrist_template_scale(
+    wrist_template: Any,
+    reference_target: Any,
+    np: Any,
+    Vector: Any,
+) -> None:
+    target_blender_obj = _get_blender_object(reference_target)
+    wrist_size = _bbox_size_vector(wrist_template, Vector, np)
+    target_size = _bbox_size_vector(target_blender_obj, Vector, np)
+    wrist_extent = float(np.max(wrist_size))
+    target_extent = float(np.max(target_size))
+    if wrist_extent <= 1e-8 or target_extent <= 1e-8:
+        return
+
+    current_ratio = wrist_extent / target_extent
+    desired_ratio = 1.65
+    min_ratio = 0.65
+    max_ratio = 3.20
+    if min_ratio <= current_ratio <= max_ratio:
+        print(
+            "[INFO] Wrist scale kept as-is: "
+            f"wrist_extent={wrist_extent:.4f}m target_extent={target_extent:.4f}m "
+            f"ratio={current_ratio:.3f}"
+        )
+        return
+
+    scale_factor = desired_ratio / current_ratio
+    wrist_blender_obj = _get_blender_object(wrist_template)
+    for vertex in wrist_blender_obj.data.vertices:
+        vertex.co *= scale_factor
+    wrist_blender_obj.data.update()
+    new_wrist_extent = float(np.max(_bbox_size_vector(wrist_template, Vector, np)))
+    print(
+        "[INFO] Wrist scale normalized: "
+        f"old_extent={wrist_extent:.4f}m new_extent={new_wrist_extent:.4f}m "
+        f"target_extent={target_extent:.4f}m scale_factor={scale_factor:.3f}"
+    )
+
+
+def _profile_offsets(profile: str, np: Any, side: float) -> tuple[float, float, float]:
     if profile == "light":
         return (
-            float(np.random.uniform(-0.006, 0.006)),
-            float(np.random.uniform(0.030, 0.050)),
-            float(np.random.uniform(-0.020, -0.010)),
+            float(side * np.random.uniform(0.040, 0.060)),
+            float(np.random.uniform(-0.050, -0.028)),
+            float(np.random.uniform(-0.010, 0.008)),
         )
     if profile == "heavy":
         return (
-            float(np.random.uniform(-0.012, 0.012)),
-            float(np.random.uniform(0.000, 0.025)),
-            float(np.random.uniform(-0.010, 0.010)),
+            float(side * np.random.uniform(0.015, 0.035)),
+            float(np.random.uniform(-0.018, 0.010)),
+            float(np.random.uniform(-0.012, 0.014)),
         )
     return (
-        float(np.random.uniform(-0.010, 0.010)),
-        float(np.random.uniform(0.012, 0.038)),
-        float(np.random.uniform(-0.016, 0.004)),
+        float(side * np.random.uniform(0.025, 0.048)),
+        float(np.random.uniform(-0.035, -0.008)),
+        float(np.random.uniform(-0.012, 0.010)),
     )
 
 
@@ -273,7 +323,7 @@ def _set_pair_poses(
         bpy.context.view_layer.update()
         target_blender_obj = _get_blender_object(target)
 
-        offset = _profile_offsets(occlusion_profile, np)
+        offset = _profile_offsets(occlusion_profile, np, side)
         wrist_local = Matrix.Translation(offset) @ Euler(
             (
                 math.radians(np.random.uniform(-8.0, 8.0)),
@@ -282,46 +332,51 @@ def _set_pair_poses(
             ),
             "XYZ",
         ).to_matrix().to_4x4()
-        wrist.matrix_world = target_blender_obj.matrix_world @ wrist_local
+        wrist_blender_obj = _get_blender_object(wrist)
+        wrist_blender_obj.matrix_world = target_blender_obj.matrix_world @ wrist_local
+        wrist.hide(False)
+        wrist_blender_obj.hide_viewport = False
+        wrist_blender_obj.hide_set(False)
 
 
 def _sample_head_camera_sequence(
     frame_count: int,
     np: Any,
     bproc: Any,
+    focus_center: Any,
 ) -> list[Any]:
     showcase = random.random() < 0.20
     if showcase:
         anchor_location = np.array(
             [
-                np.random.uniform(-0.08, 0.08),
-                np.random.uniform(-0.52, -0.34),
-                np.random.uniform(0.38, 0.60),
+                focus_center[0] + np.random.uniform(-0.05, 0.05),
+                focus_center[1] + np.random.uniform(-0.48, -0.32),
+                focus_center[2] + np.random.uniform(0.28, 0.46),
             ],
             dtype=float,
         )
         anchor_poi = np.array(
             [
-                np.random.uniform(-0.05, 0.05),
-                np.random.uniform(-0.12, -0.04),
-                np.random.uniform(0.070, 0.135),
+                focus_center[0] + np.random.uniform(-0.035, 0.035),
+                focus_center[1] + np.random.uniform(-0.015, 0.020),
+                focus_center[2] + np.random.uniform(-0.010, 0.035),
             ],
             dtype=float,
         )
     else:
         anchor_location = np.array(
             [
-                np.random.uniform(-0.12, 0.12),
-                np.random.uniform(-0.74, -0.46),
-                np.random.uniform(0.55, 0.85),
+                focus_center[0] + np.random.uniform(-0.08, 0.08),
+                focus_center[1] + np.random.uniform(-0.72, -0.44),
+                focus_center[2] + np.random.uniform(0.42, 0.70),
             ],
             dtype=float,
         )
         anchor_poi = np.array(
             [
-                np.random.uniform(-0.06, 0.06),
-                np.random.uniform(-0.12, 0.04),
-                np.random.uniform(0.040, 0.110),
+                focus_center[0] + np.random.uniform(-0.045, 0.045),
+                focus_center[1] + np.random.uniform(-0.020, 0.030),
+                focus_center[2] + np.random.uniform(-0.020, 0.030),
             ],
             dtype=float,
         )
@@ -346,6 +401,65 @@ def _sample_head_camera_sequence(
     return cam2world_mats
 
 
+def _scene_focus_center(target_bop_objs: list[Any], wrist_objs: list[Any], np: Any) -> Any:
+    centers = []
+    for obj in [*target_bop_objs, *wrist_objs]:
+        blender_obj = _get_blender_object(obj)
+        translation = blender_obj.matrix_world.translation
+        centers.append([translation.x, translation.y, translation.z])
+    if not centers:
+        return np.array([0.0, -0.10, 0.08], dtype=float)
+    return np.mean(np.asarray(centers, dtype=float), axis=0)
+
+
+def _object_debug_info(obj: Any, Vector: Any, np: Any) -> tuple[Any, Any]:
+    blender_obj = _get_blender_object(obj)
+    min_corner, max_corner = _world_bbox(blender_obj, Vector)
+    size = np.asarray(
+        [
+            max_corner.x - min_corner.x,
+            max_corner.y - min_corner.y,
+            max_corner.z - min_corner.z,
+        ],
+        dtype=float,
+    )
+    center = np.asarray(
+        [
+            (min_corner.x + max_corner.x) * 0.5,
+            (min_corner.y + max_corner.y) * 0.5,
+            (min_corner.z + max_corner.z) * 0.5,
+        ],
+        dtype=float,
+    )
+    return size, center
+
+
+def _format_vec(values: Any) -> str:
+    return "(" + ", ".join(f"{float(value):.4f}" for value in values) + ")"
+
+
+def _print_scene_debug(target_bop_objs: list[Any], wrist_objs: list[Any], Vector: Any, np: Any) -> None:
+    target_extents = []
+    wrist_extents = []
+    for index, obj in enumerate(target_bop_objs):
+        size, center = _object_debug_info(obj, Vector, np)
+        target_extents.append(float(np.max(size)))
+        print(
+            f"[INFO] target[{index}] bbox_m size={_format_vec(size)} "
+            f"center={_format_vec(center)}"
+        )
+    for index, obj in enumerate(wrist_objs):
+        size, center = _object_debug_info(obj, Vector, np)
+        wrist_extents.append(float(np.max(size)))
+        print(
+            f"[INFO] wrist[{index}] bbox_m size={_format_vec(size)} "
+            f"center={_format_vec(center)}"
+        )
+    if target_extents and wrist_extents:
+        ratio = float(np.mean(wrist_extents) / max(np.mean(target_extents), 1e-8))
+        print(f"[INFO] wrist_target_extent_ratio={ratio:.3f}")
+
+
 def render_wrist_scene(
     args: argparse.Namespace,
     material: Any,
@@ -356,7 +470,11 @@ def render_wrist_scene(
     import blenderproc as bproc
     import bpy
     import numpy as np
-    from mathutils import Euler, Matrix, Vector
+
+    mathutils = __import__("mathutils")
+    Euler = mathutils.Euler
+    Matrix = mathutils.Matrix
+    Vector = mathutils.Vector
 
     bop_dataset_path = str(output_dataset_path)
     bop_parent_path = str(output_dataset_path.parent)
@@ -451,10 +569,12 @@ def render_wrist_scene(
         args.wrist_glb,
         args.wrist_unit_scale,
         args.wrist_size_scale,
+        bproc,
         bpy,
         Vector,
     )
-    wrist_objs = [_clone_wrist(wrist_template, index, bpy) for index in range(args.object_count)]
+    _normalize_wrist_template_scale(wrist_template, target_bop_objs[0], np, Vector)
+    wrist_objs = [_clone_wrist(wrist_template, index) for index in range(args.object_count)]
 
     for obj in target_bop_objs:
         obj.set_shading_mode("auto")
@@ -472,6 +592,9 @@ def render_wrist_scene(
         Euler,
         bpy,
     )
+    bpy.context.view_layer.update()
+    _print_scene_debug(target_bop_objs, wrist_objs, Vector, np)
+    focus_center = _scene_focus_center(target_bop_objs, wrist_objs, np)
 
     bproc.renderer.enable_depth_output(activate_antialiasing=False)
     bproc.renderer.set_max_amount_of_samples(50)
@@ -482,7 +605,7 @@ def render_wrist_scene(
 
     bop_bvh_tree = bproc.object.create_bvh_tree_multi_objects(target_bop_objs)
     cam_poses = 0
-    for cam2world_matrix in _sample_head_camera_sequence(args.views_per_scene, np, bproc):
+    for cam2world_matrix in _sample_head_camera_sequence(args.views_per_scene, np, bproc, focus_center):
         if bproc.camera.perform_obstacle_in_view_check(cam2world_matrix, {"min": 0.25}, bop_bvh_tree):
             bproc.camera.add_camera_pose(cam2world_matrix, frame=cam_poses)
             cam_poses += 1
@@ -490,7 +613,7 @@ def render_wrist_scene(
     attempts = 0
     while cam_poses < args.views_per_scene and attempts < args.views_per_scene * 10:
         attempts += 1
-        fallback_matrix = _sample_head_camera_sequence(1, np, bproc)[0]
+        fallback_matrix = _sample_head_camera_sequence(1, np, bproc, focus_center)[0]
         if bproc.camera.perform_obstacle_in_view_check(fallback_matrix, {"min": 0.25}, bop_bvh_tree):
             bproc.camera.add_camera_pose(fallback_matrix, frame=cam_poses)
             cam_poses += 1

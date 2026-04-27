@@ -73,7 +73,7 @@ bash scripts/render_dji_action4_material_batch.sh
 示例：
 
 ```bash
-python scripts/prepare_dji_action4_real_bop.py
+python scripts/prepare_dji_action4_real_bop.py --overwrite
 python s1_p3_obj_infos.py --dataset-path dji-action4-real
 
 python scripts/render_dji_action4_wrist_scene.py \
@@ -671,6 +671,24 @@ python s1_p3_obj_infos.py --dataset-path dji-action4-real
 ```
 
 以生成真实模型对应的 `models_info.json`。后续八角点标签会基于这个新的 `models_info.json` 生成。
+
+如果之前已经生成过 `obj_000001.ply`，需要使用：
+
+```bash
+python scripts/prepare_dji_action4_real_bop.py --overwrite
+```
+
+新脚本会从 GLB 中提取 basecolor 图片到：
+
+```text
+dji-action4-real/models/obj_000001_basecolor.jpg
+```
+
+并在 PLY header 中写入：
+
+```text
+comment TextureFile obj_000001_basecolor.jpg
+```
 
 ---
 
