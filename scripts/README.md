@@ -5,12 +5,15 @@
 1. `DJI Action4 / HCCEPose` 数据准备与渲染脚本
 2. Hugging Face 演示资源下载脚本
 
-如果你当前关注的是 DJI Action4 的训练数据生成，建议重点看下面这 4 个脚本：
+如果你当前关注的是 DJI Action4 的训练数据生成，建议重点看下面这些脚本：
 
 - `prepare_dji_action4_bop.py`
+- `prepare_dji_action4_real_bop.py`
 - `render_dji_action4_pbr.sh`
 - `render_dji_action4_material_scene.py`
 - `render_dji_action4_material_batch.sh`
+- `render_dji_action4_wrist_scene.py`
+- `render_dji_action4_wrist_batch.sh`
 
 ---
 
@@ -54,6 +57,31 @@ python scripts/render_dji_action4_material_scene.py \
 
 MATERIAL_START=0 MATERIAL_STOP=50 \
 bash scripts/render_dji_action4_material_batch.sh
+```
+
+### 1.3 真实 DJI Action4 + 双手腕遮挡渲染流程
+
+适用于真实视频中“左右手腕各绑一个 DJI Action4”的场景。  
+这个流程只把 DJI Action4 写入 BOP 标注；手腕模型只参与渲染遮挡，不会进入 `models/`、`scene_gt.json`、YOLO 类别或八角点标签。
+
+推荐顺序：
+
+1. 把真实 DJI Action4 GLB 转成新的 BOP 目标模型
+2. 为新数据集生成 `models_info.json`
+3. 用腕部遮挡渲染脚本生成 `train_pbr`
+
+示例：
+
+```bash
+python scripts/prepare_dji_action4_real_bop.py
+python s1_p3_obj_infos.py --dataset-path dji-action4-real
+
+python scripts/render_dji_action4_wrist_scene.py \
+  --material-index 0 \
+  --skip-done
+
+MATERIAL_START=0 MATERIAL_STOP=50 \
+bash scripts/render_dji_action4_wrist_batch.sh
 ```
 
 ---
@@ -618,7 +646,118 @@ bash scripts/render_dji_action4_material_batch.sh
 
 ---
 
-## 2.5 `download_hf_assets.py`
+## 2.5 `prepare_dji_action4_real_bop.py`
+
+### 作用
+
+把真实 DJI Action4 模型：
+
+```text
+dji-action4-real-with-hand/DJI Action4 3d.glb
+```
+
+转成新的 BOP 目标模型：
+
+```text
+dji-action4-real/models/obj_000001.ply
+```
+
+这个脚本不会修改旧的 `dji-action4/` 数据集。
+
+运行后继续执行：
+
+```bash
+python s1_p3_obj_infos.py --dataset-path dji-action4-real
+```
+
+以生成真实模型对应的 `models_info.json`。后续八角点标签会基于这个新的 `models_info.json` 生成。
+
+---
+
+## 2.6 `render_dji_action4_wrist_scene.py`
+
+### 作用
+
+渲染“真实 DJI Action4 + 左右手腕遮挡”的 BOP `train_pbr` 数据。
+
+关键约束：
+
+- `target_objects` 只包含 DJI Action4
+- 手腕 GLB 只作为渲染遮挡物
+- `scene_gt.json` 中不会写入手腕
+- YOLO 类别和八角点标签仍然只有 `obj_id=1`
+- 不再给 DJI Action4 屏幕或机身额外贴随机材质图
+
+### 默认路径
+
+```text
+source dataset: dji-action4-real
+output dataset: dji-action4-real-wrist-occlusion
+wrist glb:      dji-action4-real-with-hand/wrist3d.glb
+```
+
+### 关键参数
+
+#### `--object-count`
+
+默认值：`2`。  
+对应真实视频里左右两个手腕分别绑一个 DJI Action4。
+
+#### `--occlusion-profile`
+
+默认值：`medium`。
+
+可选值：
+
+```text
+light | medium | heavy
+```
+
+建议先用 `medium`。如果可视化后发现角点遮挡过少，再尝试 `heavy`；如果目标经常不可见，则改回 `light`。
+
+#### `--wrist-unit-scale`
+
+默认值：`auto`。
+
+作用：处理手腕 GLB 的单位差异。
+
+- 如果手腕模型包围盒最大尺寸大于 `2`，脚本认为模型是毫米单位，自动乘以 `0.001`
+- 否则按米单位处理
+
+如果可视化发现手腕巨大或极小，可以手动指定：
+
+```text
+1 | 0.001 | 1000
+```
+
+#### `--wrist-size-scale`
+
+默认值：`1.0`。  
+在单位修正后额外缩放手腕模型，适合微调遮挡比例。
+
+---
+
+## 2.7 `render_dji_action4_wrist_batch.sh`
+
+### 作用
+
+按材质区间批量调用 `render_dji_action4_wrist_scene.py`。
+
+默认行为：
+
+```text
+MATERIAL_START=0
+MATERIAL_STOP=50
+OBJECT_COUNT=2
+VIEWS_PER_SCENE=20
+OCCLUSION_PROFILE=medium
+```
+
+也就是默认生成一个 1000 帧 chunk，并且每帧含两个 DJI Action4 目标实例与两个渲染用手腕遮挡物。
+
+---
+
+## 2.8 `download_hf_assets.py`
 
 ### 作用
 
