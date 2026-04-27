@@ -602,6 +602,10 @@ def render_material_scene(
 
 def main() -> int:
     args = parse_args()
+    args.textures_path = args.textures_path.expanduser().resolve()
+    args.source_dataset_path = args.source_dataset_path.expanduser().resolve()
+    args.output_dataset_path = args.output_dataset_path.expanduser().resolve()
+
     materials = enumerate_materials(args.textures_path)
 
     if args.list_materials:

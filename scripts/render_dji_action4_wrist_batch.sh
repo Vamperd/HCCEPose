@@ -15,6 +15,8 @@ MATERIAL_STOP="${MATERIAL_STOP:-50}"
 OBJECT_COUNT="${OBJECT_COUNT:-2}"
 VIEWS_PER_SCENE="${VIEWS_PER_SCENE:-20}"
 OCCLUSION_PROFILE="${OCCLUSION_PROFILE:-medium}"
+WRIST_DECIMATE_RATIO="${WRIST_DECIMATE_RATIO:-0.25}"
+RENDER_SAMPLES="${RENDER_SAMPLES:-32}"
 
 if [[ ! "${MATERIAL_START}" =~ ^[0-9]+$ ]]; then
     echo "[ERROR] MATERIAL_START must be a non-negative integer: ${MATERIAL_START}" >&2
@@ -54,6 +56,8 @@ echo "[INFO] WRIST_GLB=${WRIST_GLB}"
 echo "[INFO] OBJECT_COUNT=${OBJECT_COUNT}"
 echo "[INFO] VIEWS_PER_SCENE=${VIEWS_PER_SCENE}"
 echo "[INFO] OCCLUSION_PROFILE=${OCCLUSION_PROFILE}"
+echo "[INFO] WRIST_DECIMATE_RATIO=${WRIST_DECIMATE_RATIO}"
+echo "[INFO] RENDER_SAMPLES=${RENDER_SAMPLES}"
 echo "[INFO] MATERIAL_RANGE=[${MATERIAL_START}, ${MATERIAL_STOP})"
 
 for (( material_index=MATERIAL_START; material_index<MATERIAL_STOP; material_index++ )); do
@@ -68,6 +72,8 @@ for (( material_index=MATERIAL_START; material_index<MATERIAL_STOP; material_ind
         --object-count "${OBJECT_COUNT}" \
         --views-per-scene "${VIEWS_PER_SCENE}" \
         --occlusion-profile "${OCCLUSION_PROFILE}" \
+        --wrist-decimate-ratio "${WRIST_DECIMATE_RATIO}" \
+        --render-samples "${RENDER_SAMPLES}" \
         --material-index "${material_index}" \
         --skip-done
 done

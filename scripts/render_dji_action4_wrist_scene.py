@@ -119,6 +119,21 @@ def parse_args() -> argparse.Namespace:
         help="Additional multiplier for the wrist occluder after unit normalization.",
     )
     parser.add_argument(
+        "--wrist-decimate-ratio",
+        type=float,
+        default=0.25,
+        help=(
+            "Optional wrist mesh decimation ratio before duplicating wrist occluders. "
+            "Use 1.0 to disable. This does not affect BOP labels because wrist is render-only."
+        ),
+    )
+    parser.add_argument(
+        "--render-samples",
+        type=int,
+        default=32,
+        help="Cycles samples per pixel. Lower values reduce GPU memory and render time.",
+    )
+    parser.add_argument(
         "--skip-done",
         action="store_true",
         help="Skip material indices already marked as done in the manifest.",
@@ -232,6 +247,51 @@ def _clone_wrist(template: Any, index: int) -> Any:
     return wrist
 
 
+def _clone_wrist_shared_mesh(template: Any, index: int, bproc: Any, bpy: Any) -> Any:
+    template_blender_obj = _get_blender_object(template)
+    wrist_blender_obj = template_blender_obj.copy()
+    wrist_blender_obj.data = template_blender_obj.data
+    wrist_blender_obj.animation_data_clear()
+    wrist_blender_obj.name = f"wrist_occluder_{index:02d}"
+    bpy.context.collection.objects.link(wrist_blender_obj)
+    wrist = bproc.object.convert_to_meshes([wrist_blender_obj])[0]
+    wrist.hide(False)
+    wrist_blender_obj.hide_viewport = False
+    wrist_blender_obj.hide_set(False)
+    return wrist
+
+
+def _decimate_wrist_template(wrist_template: Any, ratio: float, bpy: Any) -> None:
+    if ratio <= 0.0 or ratio > 1.0:
+        raise ValueError(f"--wrist-decimate-ratio must be in (0, 1], got {ratio}")
+    if ratio >= 1.0:
+        return
+
+    wrist_blender_obj = _get_blender_object(wrist_template)
+    wrist_template.hide(False)
+    wrist_blender_obj.hide_viewport = False
+    wrist_blender_obj.hide_set(False)
+    before_vertices = len(wrist_blender_obj.data.vertices)
+    before_faces = len(wrist_blender_obj.data.polygons)
+    bpy.ops.object.select_all(action="DESELECT")
+    wrist_blender_obj.select_set(True)
+    bpy.context.view_layer.objects.active = wrist_blender_obj
+    modifier = wrist_blender_obj.modifiers.new("wrist_decimate", "DECIMATE")
+    modifier.ratio = ratio
+    bpy.ops.object.modifier_apply(modifier=modifier.name)
+    wrist_blender_obj.data.update()
+    after_vertices = len(wrist_blender_obj.data.vertices)
+    after_faces = len(wrist_blender_obj.data.polygons)
+    print(
+        "[INFO] Wrist decimated: "
+        f"ratio={ratio:.3f} vertices={before_vertices}->{after_vertices} "
+        f"faces={before_faces}->{after_faces}"
+    )
+    wrist_template.hide(True)
+    wrist_blender_obj.hide_viewport = True
+    wrist_blender_obj.hide_set(True)
+
+
 def _normalize_wrist_template_scale(
     wrist_template: Any,
     reference_target: Any,
@@ -322,6 +382,8 @@ def _set_pair_poses(
         target.set_rotation_euler([pitch, roll, yaw])
         bpy.context.view_layer.update()
         target_blender_obj = _get_blender_object(target)
+        target_location = target_blender_obj.matrix_world.translation.copy()
+        target_rotation = target_blender_obj.matrix_world.to_quaternion().to_matrix().to_4x4()
 
         offset = _profile_offsets(occlusion_profile, np, side)
         wrist_local = Matrix.Translation(offset) @ Euler(
@@ -333,7 +395,8 @@ def _set_pair_poses(
             "XYZ",
         ).to_matrix().to_4x4()
         wrist_blender_obj = _get_blender_object(wrist)
-        wrist_blender_obj.matrix_world = target_blender_obj.matrix_world @ wrist_local
+        target_no_scale = Matrix.Translation(target_location) @ target_rotation
+        wrist_blender_obj.matrix_world = target_no_scale @ wrist_local
         wrist.hide(False)
         wrist_blender_obj.hide_viewport = False
         wrist_blender_obj.hide_set(False)
@@ -574,7 +637,11 @@ def render_wrist_scene(
         Vector,
     )
     _normalize_wrist_template_scale(wrist_template, target_bop_objs[0], np, Vector)
-    wrist_objs = [_clone_wrist(wrist_template, index) for index in range(args.object_count)]
+    _decimate_wrist_template(wrist_template, args.wrist_decimate_ratio, bpy)
+    wrist_objs = [
+        _clone_wrist_shared_mesh(wrist_template, index, bproc, bpy)
+        for index in range(args.object_count)
+    ]
 
     for obj in target_bop_objs:
         obj.set_shading_mode("auto")
@@ -597,7 +664,7 @@ def render_wrist_scene(
     focus_center = _scene_focus_center(target_bop_objs, wrist_objs, np)
 
     bproc.renderer.enable_depth_output(activate_antialiasing=False)
-    bproc.renderer.set_max_amount_of_samples(50)
+    bproc.renderer.set_max_amount_of_samples(args.render_samples)
     bproc.renderer.set_render_devices(
         desired_gpu_device_type="CUDA",
         desired_gpu_ids=[args.gpu_id],
@@ -639,6 +706,11 @@ def render_wrist_scene(
 
 def main() -> int:
     args = parse_args()
+    args.textures_path = args.textures_path.expanduser().resolve()
+    args.source_dataset_path = args.source_dataset_path.expanduser().resolve()
+    args.output_dataset_path = args.output_dataset_path.expanduser().resolve()
+    args.wrist_glb = args.wrist_glb.expanduser().resolve()
+
     materials = enumerate_materials(args.textures_path)
 
     if args.list_materials:
