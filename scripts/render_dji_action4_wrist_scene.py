@@ -134,6 +134,42 @@ def parse_args() -> argparse.Namespace:
         help="Cycles samples per pixel. Lower values reduce GPU memory and render time.",
     )
     parser.add_argument(
+        "--camera-mode",
+        choices=["orbit", "head"],
+        default="orbit",
+        help="Camera sampling mode. orbit keeps pitch fixed while circling the subject.",
+    )
+    parser.add_argument(
+        "--orbit-radius",
+        type=float,
+        default=0.55,
+        help="Horizontal camera orbit radius in meters around the scene focus.",
+    )
+    parser.add_argument(
+        "--orbit-pitch-deg",
+        type=float,
+        default=50.0,
+        help="Fixed downward pitch angle in degrees, measured from horizontal toward the subject.",
+    )
+    parser.add_argument(
+        "--orbit-arc-deg",
+        type=float,
+        default=360.0,
+        help="Azimuth arc covered by one scene. 360 means a full circle without duplicating the endpoint.",
+    )
+    parser.add_argument(
+        "--orbit-start-deg",
+        type=float,
+        default=None,
+        help="Optional orbit start azimuth in degrees. If omitted, a random start angle is used.",
+    )
+    parser.add_argument(
+        "--orbit-roll-deg",
+        type=float,
+        default=0.0,
+        help="Fixed in-plane camera roll in degrees for orbit mode.",
+    )
+    parser.add_argument(
         "--skip-done",
         action="store_true",
         help="Skip material indices already marked as done in the manifest.",
@@ -464,6 +500,70 @@ def _sample_head_camera_sequence(
     return cam2world_mats
 
 
+def _sample_orbit_camera_sequence(
+    frame_count: int,
+    np: Any,
+    bproc: Any,
+    focus_center: Any,
+    radius: float,
+    pitch_deg: float,
+    arc_deg: float,
+    start_deg: float | None,
+    roll_deg: float,
+) -> list[Any]:
+    if frame_count <= 0:
+        return []
+    if radius <= 0.0:
+        raise ValueError(f"--orbit-radius must be positive, got {radius}")
+    if pitch_deg <= 0.0 or pitch_deg >= 89.0:
+        raise ValueError(f"--orbit-pitch-deg must be in (0, 89), got {pitch_deg}")
+
+    start = math.radians(float(np.random.uniform(0.0, 360.0) if start_deg is None else start_deg))
+    arc = math.radians(arc_deg)
+    pitch = math.radians(pitch_deg)
+    height = radius * math.tan(pitch)
+    roll = math.radians(roll_deg)
+
+    cam2world_mats = []
+    for frame_index in range(frame_count):
+        if frame_count == 1:
+            phase = 0.0
+        elif abs(abs(arc_deg) - 360.0) < 1e-6:
+            phase = frame_index / float(frame_count)
+        else:
+            phase = frame_index / float(frame_count - 1)
+
+        theta = start + arc * phase
+        location = np.array(
+            [
+                focus_center[0] + radius * math.cos(theta),
+                focus_center[1] + radius * math.sin(theta),
+                focus_center[2] + height,
+            ],
+            dtype=float,
+        )
+        poi = np.asarray(focus_center, dtype=float)
+        rotation_matrix = bproc.camera.rotation_from_forward_vec(poi - location, inplane_rot=roll)
+        cam2world_mats.append(bproc.math.build_transformation_mat(location, rotation_matrix))
+    return cam2world_mats
+
+
+def _sample_camera_sequence(args: argparse.Namespace, frame_count: int, np: Any, bproc: Any, focus_center: Any) -> list[Any]:
+    if args.camera_mode == "orbit":
+        return _sample_orbit_camera_sequence(
+            frame_count,
+            np,
+            bproc,
+            focus_center,
+            args.orbit_radius,
+            args.orbit_pitch_deg,
+            args.orbit_arc_deg,
+            args.orbit_start_deg,
+            args.orbit_roll_deg,
+        )
+    return _sample_head_camera_sequence(frame_count, np, bproc, focus_center)
+
+
 def _scene_focus_center(target_bop_objs: list[Any], wrist_objs: list[Any], np: Any) -> Any:
     centers = []
     for obj in [*target_bop_objs, *wrist_objs]:
@@ -672,7 +772,12 @@ def render_wrist_scene(
 
     bop_bvh_tree = bproc.object.create_bvh_tree_multi_objects(target_bop_objs)
     cam_poses = 0
-    for cam2world_matrix in _sample_head_camera_sequence(args.views_per_scene, np, bproc, focus_center):
+    print(
+        "[INFO] camera_mode="
+        f"{args.camera_mode} orbit_radius={args.orbit_radius:.3f}m "
+        f"orbit_pitch={args.orbit_pitch_deg:.2f}deg orbit_arc={args.orbit_arc_deg:.2f}deg"
+    )
+    for cam2world_matrix in _sample_camera_sequence(args, args.views_per_scene, np, bproc, focus_center):
         if bproc.camera.perform_obstacle_in_view_check(cam2world_matrix, {"min": 0.25}, bop_bvh_tree):
             bproc.camera.add_camera_pose(cam2world_matrix, frame=cam_poses)
             cam_poses += 1
@@ -680,7 +785,7 @@ def render_wrist_scene(
     attempts = 0
     while cam_poses < args.views_per_scene and attempts < args.views_per_scene * 10:
         attempts += 1
-        fallback_matrix = _sample_head_camera_sequence(1, np, bproc, focus_center)[0]
+        fallback_matrix = _sample_camera_sequence(args, 1, np, bproc, focus_center)[0]
         if bproc.camera.perform_obstacle_in_view_check(fallback_matrix, {"min": 0.25}, bop_bvh_tree):
             bproc.camera.add_camera_pose(fallback_matrix, frame=cam_poses)
             cam_poses += 1

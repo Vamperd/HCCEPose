@@ -15,8 +15,14 @@ MATERIAL_STOP="${MATERIAL_STOP:-50}"
 OBJECT_COUNT="${OBJECT_COUNT:-2}"
 VIEWS_PER_SCENE="${VIEWS_PER_SCENE:-20}"
 OCCLUSION_PROFILE="${OCCLUSION_PROFILE:-medium}"
+WRIST_SIZE_SCALE="${WRIST_SIZE_SCALE:-1.0}"
 WRIST_DECIMATE_RATIO="${WRIST_DECIMATE_RATIO:-0.25}"
 RENDER_SAMPLES="${RENDER_SAMPLES:-32}"
+CAMERA_MODE="${CAMERA_MODE:-orbit}"
+ORBIT_RADIUS="${ORBIT_RADIUS:-0.55}"
+ORBIT_PITCH_DEG="${ORBIT_PITCH_DEG:-50}"
+ORBIT_ARC_DEG="${ORBIT_ARC_DEG:-360}"
+ORBIT_ROLL_DEG="${ORBIT_ROLL_DEG:-0}"
 
 if [[ ! "${MATERIAL_START}" =~ ^[0-9]+$ ]]; then
     echo "[ERROR] MATERIAL_START must be a non-negative integer: ${MATERIAL_START}" >&2
@@ -56,8 +62,14 @@ echo "[INFO] WRIST_GLB=${WRIST_GLB}"
 echo "[INFO] OBJECT_COUNT=${OBJECT_COUNT}"
 echo "[INFO] VIEWS_PER_SCENE=${VIEWS_PER_SCENE}"
 echo "[INFO] OCCLUSION_PROFILE=${OCCLUSION_PROFILE}"
+echo "[INFO] WRIST_SIZE_SCALE=${WRIST_SIZE_SCALE}"
 echo "[INFO] WRIST_DECIMATE_RATIO=${WRIST_DECIMATE_RATIO}"
 echo "[INFO] RENDER_SAMPLES=${RENDER_SAMPLES}"
+echo "[INFO] CAMERA_MODE=${CAMERA_MODE}"
+echo "[INFO] ORBIT_RADIUS=${ORBIT_RADIUS}"
+echo "[INFO] ORBIT_PITCH_DEG=${ORBIT_PITCH_DEG}"
+echo "[INFO] ORBIT_ARC_DEG=${ORBIT_ARC_DEG}"
+echo "[INFO] ORBIT_ROLL_DEG=${ORBIT_ROLL_DEG}"
 echo "[INFO] MATERIAL_RANGE=[${MATERIAL_START}, ${MATERIAL_STOP})"
 
 for (( material_index=MATERIAL_START; material_index<MATERIAL_STOP; material_index++ )); do
@@ -72,8 +84,14 @@ for (( material_index=MATERIAL_START; material_index<MATERIAL_STOP; material_ind
         --object-count "${OBJECT_COUNT}" \
         --views-per-scene "${VIEWS_PER_SCENE}" \
         --occlusion-profile "${OCCLUSION_PROFILE}" \
+        --wrist-size-scale "${WRIST_SIZE_SCALE}" \
         --wrist-decimate-ratio "${WRIST_DECIMATE_RATIO}" \
         --render-samples "${RENDER_SAMPLES}" \
+        --camera-mode "${CAMERA_MODE}" \
+        --orbit-radius "${ORBIT_RADIUS}" \
+        --orbit-pitch-deg "${ORBIT_PITCH_DEG}" \
+        --orbit-arc-deg "${ORBIT_ARC_DEG}" \
+        --orbit-roll-deg "${ORBIT_ROLL_DEG}" \
         --material-index "${material_index}" \
         --skip-done
 done
