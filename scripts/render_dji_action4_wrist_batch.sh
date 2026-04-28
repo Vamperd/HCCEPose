@@ -9,6 +9,8 @@ TEXTURES_PATH="${TEXTURES_PATH:-${REPO_ROOT}/cc0textures-512}"
 SOURCE_DATASET_PATH="${SOURCE_DATASET_PATH:-${REPO_ROOT}/dji-action4-real}"
 OUTPUT_DATASET_PATH="${OUTPUT_DATASET_PATH:-${REPO_ROOT}/dji-action4-real-wrist-occlusion}"
 WRIST_GLB="${WRIST_GLB:-${REPO_ROOT}/dji-action4-real-with-hand/wrist3d.glb}"
+JACKET_GLB="${JACKET_GLB:-${REPO_ROOT}/dji-action4-real-with-hand/jack3d.glb}"
+JACKET_ENABLED="${JACKET_ENABLED:-1}"
 PY_SCRIPT="${PY_SCRIPT:-${REPO_ROOT}/scripts/render_dji_action4_wrist_scene.py}"
 MATERIAL_START="${MATERIAL_START:-0}"
 MATERIAL_STOP="${MATERIAL_STOP:-50}"
@@ -17,12 +19,21 @@ VIEWS_PER_SCENE="${VIEWS_PER_SCENE:-20}"
 OCCLUSION_PROFILE="${OCCLUSION_PROFILE:-medium}"
 WRIST_SIZE_SCALE="${WRIST_SIZE_SCALE:-1.0}"
 WRIST_DECIMATE_RATIO="${WRIST_DECIMATE_RATIO:-0.25}"
+JACKET_SIZE_SCALE="${JACKET_SIZE_SCALE:-1.0}"
+JACKET_DECIMATE_RATIO="${JACKET_DECIMATE_RATIO:-0.10}"
+TARGET_SIDE_UP_PROB="${TARGET_SIDE_UP_PROB:-0.8}"
 RENDER_SAMPLES="${RENDER_SAMPLES:-32}"
 CAMERA_MODE="${CAMERA_MODE:-orbit}"
 ORBIT_RADIUS="${ORBIT_RADIUS:-0.55}"
 ORBIT_PITCH_DEG="${ORBIT_PITCH_DEG:-}"
 ORBIT_PITCH_MIN_DEG="${ORBIT_PITCH_MIN_DEG:-20}"
 ORBIT_PITCH_MAX_DEG="${ORBIT_PITCH_MAX_DEG:-60}"
+ORBIT_PITCH_SAMPLE_MODE="${ORBIT_PITCH_SAMPLE_MODE:-per_frame}"
+ORBIT_HIGH_PITCH_PROB="${ORBIT_HIGH_PITCH_PROB:-0.7}"
+ORBIT_HIGH_PITCH_MIN_DEG="${ORBIT_HIGH_PITCH_MIN_DEG:-50}"
+ORBIT_HIGH_PITCH_MAX_DEG="${ORBIT_HIGH_PITCH_MAX_DEG:-89}"
+ORBIT_LOW_PITCH_MIN_DEG="${ORBIT_LOW_PITCH_MIN_DEG:-0}"
+ORBIT_LOW_PITCH_MAX_DEG="${ORBIT_LOW_PITCH_MAX_DEG:-50}"
 ORBIT_ARC_DEG="${ORBIT_ARC_DEG:-360}"
 ORBIT_ROLL_DEG="${ORBIT_ROLL_DEG:-0}"
 
@@ -61,17 +72,28 @@ echo "[INFO] TEXTURES_PATH=${TEXTURES_PATH}"
 echo "[INFO] SOURCE_DATASET_PATH=${SOURCE_DATASET_PATH}"
 echo "[INFO] OUTPUT_DATASET_PATH=${OUTPUT_DATASET_PATH}"
 echo "[INFO] WRIST_GLB=${WRIST_GLB}"
+echo "[INFO] JACKET_ENABLED=${JACKET_ENABLED}"
+echo "[INFO] JACKET_GLB=${JACKET_GLB}"
 echo "[INFO] OBJECT_COUNT=${OBJECT_COUNT}"
 echo "[INFO] VIEWS_PER_SCENE=${VIEWS_PER_SCENE}"
 echo "[INFO] OCCLUSION_PROFILE=${OCCLUSION_PROFILE}"
 echo "[INFO] WRIST_SIZE_SCALE=${WRIST_SIZE_SCALE}"
 echo "[INFO] WRIST_DECIMATE_RATIO=${WRIST_DECIMATE_RATIO}"
+echo "[INFO] JACKET_SIZE_SCALE=${JACKET_SIZE_SCALE}"
+echo "[INFO] JACKET_DECIMATE_RATIO=${JACKET_DECIMATE_RATIO}"
+echo "[INFO] TARGET_SIDE_UP_PROB=${TARGET_SIDE_UP_PROB}"
 echo "[INFO] RENDER_SAMPLES=${RENDER_SAMPLES}"
 echo "[INFO] CAMERA_MODE=${CAMERA_MODE}"
 echo "[INFO] ORBIT_RADIUS=${ORBIT_RADIUS}"
 echo "[INFO] ORBIT_PITCH_DEG=${ORBIT_PITCH_DEG:-random}"
 echo "[INFO] ORBIT_PITCH_MIN_DEG=${ORBIT_PITCH_MIN_DEG}"
 echo "[INFO] ORBIT_PITCH_MAX_DEG=${ORBIT_PITCH_MAX_DEG}"
+echo "[INFO] ORBIT_PITCH_SAMPLE_MODE=${ORBIT_PITCH_SAMPLE_MODE}"
+echo "[INFO] ORBIT_HIGH_PITCH_PROB=${ORBIT_HIGH_PITCH_PROB}"
+echo "[INFO] ORBIT_HIGH_PITCH_MIN_DEG=${ORBIT_HIGH_PITCH_MIN_DEG}"
+echo "[INFO] ORBIT_HIGH_PITCH_MAX_DEG=${ORBIT_HIGH_PITCH_MAX_DEG}"
+echo "[INFO] ORBIT_LOW_PITCH_MIN_DEG=${ORBIT_LOW_PITCH_MIN_DEG}"
+echo "[INFO] ORBIT_LOW_PITCH_MAX_DEG=${ORBIT_LOW_PITCH_MAX_DEG}"
 echo "[INFO] ORBIT_ARC_DEG=${ORBIT_ARC_DEG}"
 echo "[INFO] ORBIT_ROLL_DEG=${ORBIT_ROLL_DEG}"
 echo "[INFO] MATERIAL_RANGE=[${MATERIAL_START}, ${MATERIAL_STOP})"
@@ -82,7 +104,20 @@ if [[ -n "${ORBIT_PITCH_DEG}" ]]; then
 else
     orbit_pitch_args+=(--orbit-pitch-min-deg "${ORBIT_PITCH_MIN_DEG}")
     orbit_pitch_args+=(--orbit-pitch-max-deg "${ORBIT_PITCH_MAX_DEG}")
+    orbit_pitch_args+=(--orbit-pitch-sample-mode "${ORBIT_PITCH_SAMPLE_MODE}")
+    orbit_pitch_args+=(--orbit-high-pitch-prob "${ORBIT_HIGH_PITCH_PROB}")
+    orbit_pitch_args+=(--orbit-high-pitch-min-deg "${ORBIT_HIGH_PITCH_MIN_DEG}")
+    orbit_pitch_args+=(--orbit-high-pitch-max-deg "${ORBIT_HIGH_PITCH_MAX_DEG}")
+    orbit_pitch_args+=(--orbit-low-pitch-min-deg "${ORBIT_LOW_PITCH_MIN_DEG}")
+    orbit_pitch_args+=(--orbit-low-pitch-max-deg "${ORBIT_LOW_PITCH_MAX_DEG}")
 fi
+
+jacket_enabled_args=(--jacket-enabled)
+case "${JACKET_ENABLED}" in
+    0|false|False|FALSE|no|No|NO)
+        jacket_enabled_args=(--no-jacket-enabled)
+        ;;
+esac
 
 for (( material_index=MATERIAL_START; material_index<MATERIAL_STOP; material_index++ )); do
     echo "[INFO] Starting wrist material index ${material_index}"
@@ -93,11 +128,16 @@ for (( material_index=MATERIAL_START; material_index<MATERIAL_STOP; material_ind
         --source-dataset-path "${SOURCE_DATASET_PATH}" \
         --output-dataset-path "${OUTPUT_DATASET_PATH}" \
         --wrist-glb "${WRIST_GLB}" \
+        "${jacket_enabled_args[@]}" \
+        --jacket-glb "${JACKET_GLB}" \
         --object-count "${OBJECT_COUNT}" \
         --views-per-scene "${VIEWS_PER_SCENE}" \
         --occlusion-profile "${OCCLUSION_PROFILE}" \
         --wrist-size-scale "${WRIST_SIZE_SCALE}" \
         --wrist-decimate-ratio "${WRIST_DECIMATE_RATIO}" \
+        --jacket-size-scale "${JACKET_SIZE_SCALE}" \
+        --jacket-decimate-ratio "${JACKET_DECIMATE_RATIO}" \
+        --target-side-up-prob "${TARGET_SIDE_UP_PROB}" \
         --render-samples "${RENDER_SAMPLES}" \
         --camera-mode "${CAMERA_MODE}" \
         --orbit-radius "${ORBIT_RADIUS}" \

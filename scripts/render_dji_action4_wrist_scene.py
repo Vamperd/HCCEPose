@@ -71,6 +71,20 @@ def parse_args() -> argparse.Namespace:
         help="Render-only wrist GLB path.",
     )
     parser.add_argument(
+        "--jacket-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable the render-only jacket/background GLB.",
+    )
+    parser.add_argument(
+        "--jacket-glb",
+        type=Path,
+        default=repo_root
+        / "dji-action4-real-with-hand"
+        / "jack3d.glb",
+        help="Render-only jacket GLB path.",
+    )
+    parser.add_argument(
         "--material-index",
         type=int,
         default=None,
@@ -119,6 +133,12 @@ def parse_args() -> argparse.Namespace:
         help="Additional multiplier for the wrist occluder after unit normalization.",
     )
     parser.add_argument(
+        "--jacket-size-scale",
+        type=float,
+        default=1.0,
+        help="Additional multiplier for the jacket/background model after unit normalization.",
+    )
+    parser.add_argument(
         "--wrist-decimate-ratio",
         type=float,
         default=0.25,
@@ -126,6 +146,18 @@ def parse_args() -> argparse.Namespace:
             "Optional wrist mesh decimation ratio before duplicating wrist occluders. "
             "Use 1.0 to disable. This does not affect BOP labels because wrist is render-only."
         ),
+    )
+    parser.add_argument(
+        "--jacket-decimate-ratio",
+        type=float,
+        default=0.10,
+        help="Optional jacket mesh decimation ratio. Use 1.0 to disable.",
+    )
+    parser.add_argument(
+        "--target-side-up-prob",
+        type=float,
+        default=0.8,
+        help="Probability that each DJI target is placed with its local left/right side facing upward.",
     )
     parser.add_argument(
         "--render-samples",
@@ -158,13 +190,49 @@ def parse_args() -> argparse.Namespace:
         "--orbit-pitch-min-deg",
         type=float,
         default=20.0,
-        help="Minimum random orbit pitch angle in degrees when --orbit-pitch-deg is omitted.",
+        help="Legacy minimum random orbit pitch angle. Used only by --orbit-pitch-sample-mode scene_uniform.",
     )
     parser.add_argument(
         "--orbit-pitch-max-deg",
         type=float,
         default=60.0,
-        help="Maximum random orbit pitch angle in degrees when --orbit-pitch-deg is omitted.",
+        help="Legacy maximum random orbit pitch angle. Used only by --orbit-pitch-sample-mode scene_uniform.",
+    )
+    parser.add_argument(
+        "--orbit-pitch-sample-mode",
+        choices=["per_frame", "scene_uniform"],
+        default="per_frame",
+        help="Whether orbit pitch is sampled independently per frame or once per scene.",
+    )
+    parser.add_argument(
+        "--orbit-high-pitch-prob",
+        type=float,
+        default=0.7,
+        help="Probability of sampling orbit pitch from the high/downward pitch range.",
+    )
+    parser.add_argument(
+        "--orbit-high-pitch-min-deg",
+        type=float,
+        default=50.0,
+        help="Minimum high/downward orbit pitch in degrees.",
+    )
+    parser.add_argument(
+        "--orbit-high-pitch-max-deg",
+        type=float,
+        default=89.0,
+        help="Maximum high/downward orbit pitch in degrees.",
+    )
+    parser.add_argument(
+        "--orbit-low-pitch-min-deg",
+        type=float,
+        default=0.0,
+        help="Minimum low orbit pitch in degrees.",
+    )
+    parser.add_argument(
+        "--orbit-low-pitch-max-deg",
+        type=float,
+        default=50.0,
+        help="Maximum low orbit pitch in degrees.",
     )
     parser.add_argument(
         "--orbit-arc-deg",
@@ -246,20 +314,48 @@ def _import_centered_wrist_template(
     bpy: Any,
     Vector: Any,
 ) -> Any:
-    if not wrist_glb.is_file():
-        raise FileNotFoundError(f"Missing wrist GLB: {wrist_glb}")
+    return _import_centered_render_template(
+        wrist_glb,
+        wrist_unit_scale,
+        wrist_size_scale,
+        "wrist_occluder_template",
+        bproc,
+        bpy,
+        Vector,
+    )
 
-    imported_meshes = bproc.loader.load_obj(os.fspath(wrist_glb))
+
+def _import_centered_render_template(
+    glb_path: Path,
+    unit_scale_arg: str,
+    size_scale: float,
+    object_name: str,
+    bproc: Any,
+    bpy: Any,
+    Vector: Any,
+) -> Any:
+    if not glb_path.is_file():
+        raise FileNotFoundError(f"Missing render-only GLB: {glb_path}")
+
+    imported_meshes = bproc.loader.load_obj(os.fspath(glb_path))
     if not imported_meshes:
-        raise RuntimeError(f"No mesh objects were imported from {wrist_glb}")
-    if len(imported_meshes) != 1:
-        raise RuntimeError(
-            f"Expected wrist GLB to contain one mesh object, got {len(imported_meshes)}: {wrist_glb}"
-        )
-
+        raise RuntimeError(f"No mesh objects were imported from {glb_path}")
     template = imported_meshes[0]
     template_blender_obj = _get_blender_object(template)
-    template_blender_obj.name = "wrist_occluder_template"
+    if len(imported_meshes) > 1:
+        bpy.ops.object.select_all(action="DESELECT")
+        for mesh_obj in imported_meshes:
+            blender_obj = _get_blender_object(mesh_obj)
+            blender_obj.select_set(True)
+        bpy.context.view_layer.objects.active = template_blender_obj
+        bpy.ops.object.join()
+        template_blender_obj = bpy.context.view_layer.objects.active
+        template = bproc.object.convert_to_meshes([template_blender_obj])[0]
+        print(
+            f"[INFO] Joined {len(imported_meshes)} meshes from {glb_path.name} "
+            f"into render-only object {object_name}."
+        )
+    template_blender_obj.name = object_name
     bpy.ops.object.select_all(action="DESELECT")
     template_blender_obj.select_set(True)
     bpy.context.view_layer.objects.active = template_blender_obj
@@ -267,11 +363,11 @@ def _import_centered_wrist_template(
 
     min_corner, max_corner = _world_bbox(template_blender_obj, Vector)
     extent = max(max_corner - min_corner)
-    if wrist_unit_scale == "auto":
+    if unit_scale_arg == "auto":
         unit_scale = 0.001 if extent > 2.0 else 1.0
     else:
-        unit_scale = float(wrist_unit_scale)
-    scale = unit_scale * wrist_size_scale
+        unit_scale = float(unit_scale_arg)
+    scale = unit_scale * size_scale
     center = (min_corner + max_corner) * 0.5
 
     for vertex in template_blender_obj.data.vertices:
@@ -313,34 +409,54 @@ def _clone_wrist_shared_mesh(template: Any, index: int, bproc: Any, bpy: Any) ->
 
 
 def _decimate_wrist_template(wrist_template: Any, ratio: float, bpy: Any) -> None:
+    _decimate_render_template(wrist_template, ratio, bpy, "Wrist")
+
+
+def _decimate_render_template(render_template: Any, ratio: float, bpy: Any, label: str) -> None:
     if ratio <= 0.0 or ratio > 1.0:
-        raise ValueError(f"--wrist-decimate-ratio must be in (0, 1], got {ratio}")
+        raise ValueError(f"{label} decimate ratio must be in (0, 1], got {ratio}")
     if ratio >= 1.0:
         return
 
-    wrist_blender_obj = _get_blender_object(wrist_template)
-    wrist_template.hide(False)
-    wrist_blender_obj.hide_viewport = False
-    wrist_blender_obj.hide_set(False)
-    before_vertices = len(wrist_blender_obj.data.vertices)
-    before_faces = len(wrist_blender_obj.data.polygons)
+    blender_obj = _get_blender_object(render_template)
+    render_template.hide(False)
+    blender_obj.hide_viewport = False
+    blender_obj.hide_set(False)
+    before_vertices = len(blender_obj.data.vertices)
+    before_faces = len(blender_obj.data.polygons)
     bpy.ops.object.select_all(action="DESELECT")
-    wrist_blender_obj.select_set(True)
-    bpy.context.view_layer.objects.active = wrist_blender_obj
-    modifier = wrist_blender_obj.modifiers.new("wrist_decimate", "DECIMATE")
+    blender_obj.select_set(True)
+    bpy.context.view_layer.objects.active = blender_obj
+    modifier = blender_obj.modifiers.new(f"{label.lower()}_decimate", "DECIMATE")
     modifier.ratio = ratio
     bpy.ops.object.modifier_apply(modifier=modifier.name)
-    wrist_blender_obj.data.update()
-    after_vertices = len(wrist_blender_obj.data.vertices)
-    after_faces = len(wrist_blender_obj.data.polygons)
+    blender_obj.data.update()
+    after_vertices = len(blender_obj.data.vertices)
+    after_faces = len(blender_obj.data.polygons)
     print(
-        "[INFO] Wrist decimated: "
+        f"[INFO] {label} decimated: "
         f"ratio={ratio:.3f} vertices={before_vertices}->{after_vertices} "
         f"faces={before_faces}->{after_faces}"
     )
-    wrist_template.hide(True)
-    wrist_blender_obj.hide_viewport = True
-    wrist_blender_obj.hide_set(True)
+    render_template.hide(True)
+    blender_obj.hide_viewport = True
+    blender_obj.hide_set(True)
+
+
+def _place_jacket_background(jacket_obj: Any, Vector: Any, bpy: Any) -> float:
+    jacket_blender_obj = _get_blender_object(jacket_obj)
+    jacket_obj.hide(False)
+    jacket_blender_obj.hide_viewport = False
+    jacket_blender_obj.hide_set(False)
+    jacket_blender_obj.location = (0.0, 0.0, 0.0)
+    bpy.context.view_layer.update()
+
+    _, max_corner = _world_bbox(jacket_blender_obj, Vector)
+    jacket_blender_obj.location.z -= max_corner.z
+    bpy.context.view_layer.update()
+
+    _, max_corner = _world_bbox(jacket_blender_obj, Vector)
+    return float(max_corner.z)
 
 
 def _normalize_wrist_template_scale(
@@ -406,9 +522,12 @@ def _set_pair_poses(
     target_bop_objs: list[Any],
     wrist_objs: list[Any],
     occlusion_profile: str,
+    jacket_top_z: float,
+    target_side_up_prob: float,
     np: Any,
     Matrix: Any,
     Euler: Any,
+    Vector: Any,
     bpy: Any,
 ) -> None:
     count = len(target_bop_objs)
@@ -421,16 +540,38 @@ def _set_pair_poses(
             [
                 start_x + index * spacing + np.random.uniform(-0.025, 0.025),
                 np.random.uniform(-0.18, -0.08),
-                np.random.uniform(0.060, 0.115),
+                jacket_top_z + np.random.uniform(0.060, 0.115),
             ],
             dtype=float,
         )
         yaw = math.radians(side * np.random.uniform(8.0, 22.0) + np.random.uniform(-7.0, 7.0))
-        pitch = math.radians(np.random.uniform(-10.0, 10.0))
-        roll = math.radians(side * np.random.uniform(5.0, 18.0))
+        target_side_up_prob = min(max(float(target_side_up_prob), 0.0), 1.0)
+        if np.random.random() < target_side_up_prob:
+            side_up_sign = -1.0 if np.random.random() < 0.5 else 1.0
+            orientation_category = "left_side_up" if side_up_sign < 0.0 else "right_side_up"
+            side_tilt = math.radians(side_up_sign * 90.0 + np.random.uniform(-8.0, 8.0))
+            target_rotation_matrix = (
+                Matrix.Rotation(yaw, 4, "Z")
+                @ Matrix.Rotation(side_tilt, 4, "Y")
+                @ Euler(
+                    (
+                        math.radians(np.random.uniform(-7.0, 7.0)),
+                        math.radians(np.random.uniform(-5.0, 5.0)),
+                        math.radians(np.random.uniform(-6.0, 6.0)),
+                    ),
+                    "XYZ",
+                ).to_matrix().to_4x4()
+            )
+            rotation_euler = target_rotation_matrix.to_euler()
+        else:
+            orientation_category = "top_up"
+            pitch = math.radians(np.random.uniform(-10.0, 10.0))
+            roll = math.radians(side * np.random.uniform(5.0, 18.0))
+            rotation_euler = Euler((pitch, roll, yaw), "XYZ")
 
         target.set_location(location)
-        target.set_rotation_euler([pitch, roll, yaw])
+        target.set_rotation_euler(rotation_euler)
+        print(f"[INFO] target[{index}] orientation={orientation_category}")
         bpy.context.view_layer.update()
         target_blender_obj = _get_blender_object(target)
         target_location = target_blender_obj.matrix_world.translation.copy()
@@ -451,6 +592,18 @@ def _set_pair_poses(
         wrist.hide(False)
         wrist_blender_obj.hide_viewport = False
         wrist_blender_obj.hide_set(False)
+        bpy.context.view_layer.update()
+
+        target_min, _ = _world_bbox(target_blender_obj, Vector)
+        wrist_min, _ = _world_bbox(wrist_blender_obj, Vector)
+        min_z = min(float(target_min.z), float(wrist_min.z))
+        min_allowed_z = jacket_top_z + 0.005
+        if min_z < min_allowed_z:
+            lift = min_allowed_z - min_z
+            target.set_location(target_blender_obj.location + Vector((0.0, 0.0, lift)))
+            wrist_blender_obj.matrix_world.translation.z += lift
+            bpy.context.view_layer.update()
+            print(f"[INFO] target[{index}] wrist_pair_lifted_m={lift:.4f}")
 
 
 def _sample_head_camera_sequence(
@@ -524,30 +677,58 @@ def _sample_orbit_camera_sequence(
     pitch_deg: float | None,
     pitch_min_deg: float,
     pitch_max_deg: float,
+    pitch_sample_mode: str,
+    high_pitch_prob: float,
+    high_pitch_min_deg: float,
+    high_pitch_max_deg: float,
+    low_pitch_min_deg: float,
+    low_pitch_max_deg: float,
     arc_deg: float,
     start_deg: float | None,
     roll_deg: float,
+    jacket_top_z: float,
 ) -> list[Any]:
     if frame_count <= 0:
         return []
     if radius <= 0.0:
         raise ValueError(f"--orbit-radius must be positive, got {radius}")
-    if pitch_min_deg <= 0.0 or pitch_max_deg >= 89.0 or pitch_min_deg > pitch_max_deg:
+
+    def validate_pitch_range(label: str, min_deg: float, max_deg: float) -> None:
+        if min_deg < 0.0 or max_deg >= 89.5 or min_deg > max_deg:
+            raise ValueError(
+                f"{label} must satisfy 0 <= min <= max < 89.5, "
+                f"got min={min_deg}, max={max_deg}"
+            )
+
+    validate_pitch_range("--orbit-pitch-min/max-deg", pitch_min_deg, pitch_max_deg)
+    validate_pitch_range("--orbit-high-pitch-min/max-deg", high_pitch_min_deg, high_pitch_max_deg)
+    validate_pitch_range("--orbit-low-pitch-min/max-deg", low_pitch_min_deg, low_pitch_max_deg)
+    if not 0.0 <= high_pitch_prob <= 1.0:
         raise ValueError(
-            "--orbit-pitch-min-deg and --orbit-pitch-max-deg must satisfy "
-            f"0 < min <= max < 89, got min={pitch_min_deg}, max={pitch_max_deg}"
+            f"--orbit-high-pitch-prob must be in [0, 1], got {high_pitch_prob}"
         )
-    if pitch_deg is None:
-        pitch_deg = float(np.random.uniform(pitch_min_deg, pitch_max_deg))
-    if pitch_deg <= 0.0 or pitch_deg >= 89.0:
-        raise ValueError(f"--orbit-pitch-deg must be in (0, 89), got {pitch_deg}")
-    print(f"[INFO] orbit_pitch_sampled_deg={pitch_deg:.2f}")
 
     start = math.radians(float(np.random.uniform(0.0, 360.0) if start_deg is None else start_deg))
     arc = math.radians(arc_deg)
-    pitch = math.radians(pitch_deg)
-    height = radius * math.tan(pitch)
     roll = math.radians(roll_deg)
+
+    fixed_pitch_deg = pitch_deg
+    scene_pitch_deg = None
+    if fixed_pitch_deg is not None:
+        if fixed_pitch_deg < 0.0 or fixed_pitch_deg >= 89.5:
+            raise ValueError(f"--orbit-pitch-deg must be in [0, 89.5), got {fixed_pitch_deg}")
+    elif pitch_sample_mode == "scene_uniform":
+        scene_pitch_deg = float(np.random.uniform(pitch_min_deg, pitch_max_deg))
+        print(f"[INFO] orbit_pitch_sampled_deg scene={scene_pitch_deg:.2f} bucket=scene_uniform")
+
+    def sample_pitch(frame_index: int) -> tuple[float, str]:
+        if fixed_pitch_deg is not None:
+            return float(fixed_pitch_deg), "fixed"
+        if scene_pitch_deg is not None:
+            return float(scene_pitch_deg), "scene_uniform"
+        if np.random.random() < high_pitch_prob:
+            return float(np.random.uniform(high_pitch_min_deg, high_pitch_max_deg)), "high"
+        return float(np.random.uniform(low_pitch_min_deg, low_pitch_max_deg)), "low"
 
     cam2world_mats = []
     for frame_index in range(frame_count):
@@ -559,11 +740,17 @@ def _sample_orbit_camera_sequence(
             phase = frame_index / float(frame_count - 1)
 
         theta = start + arc * phase
+        sampled_pitch_deg, pitch_bucket = sample_pitch(frame_index)
+        print(
+            f"[INFO] orbit_pitch_sampled_deg frame={frame_index} "
+            f"bucket={pitch_bucket} pitch={sampled_pitch_deg:.2f}"
+        )
+        height = radius * math.tan(math.radians(sampled_pitch_deg))
         location = np.array(
             [
                 focus_center[0] + radius * math.cos(theta),
                 focus_center[1] + radius * math.sin(theta),
-                focus_center[2] + height,
+                max(focus_center[2] + height, jacket_top_z + 0.080),
             ],
             dtype=float,
         )
@@ -573,7 +760,14 @@ def _sample_orbit_camera_sequence(
     return cam2world_mats
 
 
-def _sample_camera_sequence(args: argparse.Namespace, frame_count: int, np: Any, bproc: Any, focus_center: Any) -> list[Any]:
+def _sample_camera_sequence(
+    args: argparse.Namespace,
+    frame_count: int,
+    np: Any,
+    bproc: Any,
+    focus_center: Any,
+    jacket_top_z: float,
+) -> list[Any]:
     if args.camera_mode == "orbit":
         return _sample_orbit_camera_sequence(
             frame_count,
@@ -584,9 +778,16 @@ def _sample_camera_sequence(args: argparse.Namespace, frame_count: int, np: Any,
             args.orbit_pitch_deg,
             args.orbit_pitch_min_deg,
             args.orbit_pitch_max_deg,
+            args.orbit_pitch_sample_mode,
+            args.orbit_high_pitch_prob,
+            args.orbit_high_pitch_min_deg,
+            args.orbit_high_pitch_max_deg,
+            args.orbit_low_pitch_min_deg,
+            args.orbit_low_pitch_max_deg,
             args.orbit_arc_deg,
             args.orbit_start_deg,
             args.orbit_roll_deg,
+            jacket_top_z,
         )
     return _sample_head_camera_sequence(frame_count, np, bproc, focus_center)
 
@@ -628,7 +829,14 @@ def _format_vec(values: Any) -> str:
     return "(" + ", ".join(f"{float(value):.4f}" for value in values) + ")"
 
 
-def _print_scene_debug(target_bop_objs: list[Any], wrist_objs: list[Any], Vector: Any, np: Any) -> None:
+def _print_scene_debug(
+    target_bop_objs: list[Any],
+    wrist_objs: list[Any],
+    jacket_obj: Any | None,
+    jacket_top_z: float,
+    Vector: Any,
+    np: Any,
+) -> None:
     target_extents = []
     wrist_extents = []
     for index, obj in enumerate(target_bop_objs):
@@ -644,6 +852,12 @@ def _print_scene_debug(target_bop_objs: list[Any], wrist_objs: list[Any], Vector
         print(
             f"[INFO] wrist[{index}] bbox_m size={_format_vec(size)} "
             f"center={_format_vec(center)}"
+        )
+    if jacket_obj is not None:
+        size, center = _object_debug_info(jacket_obj, Vector, np)
+        print(
+            f"[INFO] jacket bbox_m size={_format_vec(size)} "
+            f"center={_format_vec(center)} top_z={jacket_top_z:.4f}"
         )
     if target_extents and wrist_extents:
         ratio = float(np.mean(wrist_extents) / max(np.mean(target_extents), 1e-8))
@@ -770,6 +984,25 @@ def render_wrist_scene(
         for index in range(args.object_count)
     ]
 
+    jacket_obj = None
+    jacket_top_z = 0.0
+    if args.jacket_enabled:
+        jacket_obj = _import_centered_render_template(
+            args.jacket_glb,
+            "auto",
+            args.jacket_size_scale,
+            "jacket_background",
+            bproc,
+            bpy,
+            Vector,
+        )
+        _decimate_render_template(jacket_obj, args.jacket_decimate_ratio, bpy, "Jacket")
+        jacket_top_z = _place_jacket_background(jacket_obj, Vector, bpy)
+        print(
+            "[INFO] Jacket background enabled: "
+            f"glb={args.jacket_glb} top_z={jacket_top_z:.4f}m"
+        )
+
     for obj in target_bop_objs:
         obj.set_shading_mode("auto")
         material_slot = obj.get_materials()[0]
@@ -781,13 +1014,16 @@ def render_wrist_scene(
         target_bop_objs,
         wrist_objs,
         args.occlusion_profile,
+        jacket_top_z,
+        args.target_side_up_prob,
         np,
         Matrix,
         Euler,
+        Vector,
         bpy,
     )
     bpy.context.view_layer.update()
-    _print_scene_debug(target_bop_objs, wrist_objs, Vector, np)
+    _print_scene_debug(target_bop_objs, wrist_objs, jacket_obj, jacket_top_z, Vector, np)
     focus_center = _scene_focus_center(target_bop_objs, wrist_objs, np)
 
     bproc.renderer.enable_depth_output(activate_antialiasing=False)
@@ -803,10 +1039,21 @@ def render_wrist_scene(
         "[INFO] camera_mode="
         f"{args.camera_mode} orbit_radius={args.orbit_radius:.3f}m "
         f"orbit_pitch={args.orbit_pitch_deg if args.orbit_pitch_deg is not None else 'random'} "
-        f"orbit_pitch_range=({args.orbit_pitch_min_deg:.2f}, {args.orbit_pitch_max_deg:.2f})deg "
+        f"orbit_pitch_sample_mode={args.orbit_pitch_sample_mode} "
+        f"orbit_high_pitch=({args.orbit_high_pitch_min_deg:.2f}, "
+        f"{args.orbit_high_pitch_max_deg:.2f})deg prob={args.orbit_high_pitch_prob:.2f} "
+        f"orbit_low_pitch=({args.orbit_low_pitch_min_deg:.2f}, "
+        f"{args.orbit_low_pitch_max_deg:.2f})deg "
         f"orbit_arc={args.orbit_arc_deg:.2f}deg"
     )
-    for cam2world_matrix in _sample_camera_sequence(args, args.views_per_scene, np, bproc, focus_center):
+    for cam2world_matrix in _sample_camera_sequence(
+        args,
+        args.views_per_scene,
+        np,
+        bproc,
+        focus_center,
+        jacket_top_z,
+    ):
         if bproc.camera.perform_obstacle_in_view_check(cam2world_matrix, {"min": 0.25}, bop_bvh_tree):
             bproc.camera.add_camera_pose(cam2world_matrix, frame=cam_poses)
             cam_poses += 1
@@ -814,7 +1061,14 @@ def render_wrist_scene(
     attempts = 0
     while cam_poses < args.views_per_scene and attempts < args.views_per_scene * 10:
         attempts += 1
-        fallback_matrix = _sample_camera_sequence(args, 1, np, bproc, focus_center)[0]
+        fallback_matrix = _sample_camera_sequence(
+            args,
+            1,
+            np,
+            bproc,
+            focus_center,
+            jacket_top_z,
+        )[0]
         if bproc.camera.perform_obstacle_in_view_check(fallback_matrix, {"min": 0.25}, bop_bvh_tree):
             bproc.camera.add_camera_pose(fallback_matrix, frame=cam_poses)
             cam_poses += 1
@@ -844,6 +1098,7 @@ def main() -> int:
     args.source_dataset_path = args.source_dataset_path.expanduser().resolve()
     args.output_dataset_path = args.output_dataset_path.expanduser().resolve()
     args.wrist_glb = args.wrist_glb.expanduser().resolve()
+    args.jacket_glb = args.jacket_glb.expanduser().resolve()
 
     materials = enumerate_materials(args.textures_path)
 
@@ -909,6 +1164,13 @@ def main() -> int:
         "object_count": args.object_count,
         "occlusion_profile": args.occlusion_profile,
         "wrist_glb": str(args.wrist_glb),
+        "wrist_size_scale": args.wrist_size_scale,
+        "jacket_enabled": args.jacket_enabled,
+        "jacket_glb": str(args.jacket_glb),
+        "jacket_size_scale": args.jacket_size_scale,
+        "orbit_pitch_sample_mode": args.orbit_pitch_sample_mode,
+        "orbit_high_pitch_prob": args.orbit_high_pitch_prob,
+        "target_side_up_prob": args.target_side_up_prob,
         "output_dataset_path": str(args.output_dataset_path),
     }
 
