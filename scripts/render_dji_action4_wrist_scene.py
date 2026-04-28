@@ -151,12 +151,6 @@ def parse_args() -> argparse.Namespace:
         help="Local jacket axis treated as the front face normal and rotated to world +Z.",
     )
     parser.add_argument(
-        "--jacket-use-scene-material",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Apply the current background material package to the jacket surface.",
-    )
-    parser.add_argument(
         "--room-floor-gap",
         type=float,
         default=0.03,
@@ -200,6 +194,11 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=32,
         help="Cycles samples per pixel. Lower values reduce GPU memory and render time.",
+    )
+    parser.add_argument(
+        "--verbose-debug",
+        action="store_true",
+        help="Print per-frame camera and per-object pose diagnostics.",
     )
     parser.add_argument(
         "--camera-mode",
@@ -551,9 +550,11 @@ def _place_jacket_background(
     jacket_blender_obj.hide_render = False
     jacket_blender_obj.hide_set(False)
     jacket_blender_obj.location = (0.0, 0.0, 0.0)
-    jacket_blender_obj.rotation_euler = _axis_vector(front_up_axis, Vector).rotation_difference(
-        Vector((0.0, 0.0, 1.0))
-    ).to_euler()
+    jacket_blender_obj.rotation_euler = (0.0, 0.0, 0.0)
+    rotation = _axis_vector(front_up_axis, Vector).rotation_difference(Vector((0.0, 0.0, 1.0)))
+    for vertex in jacket_blender_obj.data.vertices:
+        vertex.co = rotation @ vertex.co
+    jacket_blender_obj.data.update()
     bpy.context.view_layer.update()
 
     _, max_corner = _world_bbox(jacket_blender_obj, Vector)
@@ -635,6 +636,7 @@ def _set_pair_poses(
     Euler: Any,
     Vector: Any,
     bpy: Any,
+    verbose_debug: bool,
 ) -> None:
     count = len(target_bop_objs)
     spacing = 0.26 if count > 1 else 0.0
@@ -679,10 +681,11 @@ def _set_pair_poses(
 
         target.set_location(location)
         target.set_rotation_euler(rotation_euler)
-        print(
-            f"[INFO] target[{index}] orientation={orientation_category} "
-            f"axis={target_side_up_axis}"
-        )
+        if verbose_debug:
+            print(
+                f"[DEBUG] target[{index}] orientation={orientation_category} "
+                f"axis={target_side_up_axis}"
+            )
         bpy.context.view_layer.update()
         target_blender_obj = _get_blender_object(target)
         target_location = target_blender_obj.matrix_world.translation.copy()
@@ -714,7 +717,8 @@ def _set_pair_poses(
             target.set_location(target_blender_obj.location + Vector((0.0, 0.0, lift)))
             wrist_blender_obj.matrix_world.translation.z += lift
             bpy.context.view_layer.update()
-            print(f"[INFO] target[{index}] wrist_pair_lifted_m={lift:.4f}")
+            if verbose_debug:
+                print(f"[DEBUG] target[{index}] wrist_pair_lifted_m={lift:.4f}")
 
 
 def _sample_head_camera_sequence(
@@ -798,6 +802,7 @@ def _sample_orbit_camera_sequence(
     start_deg: float | None,
     roll_deg: float,
     jacket_top_z: float,
+    verbose_debug: bool,
 ) -> list[Any]:
     if frame_count <= 0:
         return []
@@ -830,7 +835,8 @@ def _sample_orbit_camera_sequence(
             raise ValueError(f"--orbit-pitch-deg must be in [0, 89.5), got {fixed_pitch_deg}")
     elif pitch_sample_mode == "scene_uniform":
         scene_pitch_deg = float(np.random.uniform(pitch_min_deg, pitch_max_deg))
-        print(f"[INFO] orbit_pitch_sampled_deg scene={scene_pitch_deg:.2f} bucket=scene_uniform")
+        if verbose_debug:
+            print(f"[DEBUG] orbit_pitch_sampled_deg scene={scene_pitch_deg:.2f} bucket=scene_uniform")
 
     def sample_pitch(frame_index: int) -> tuple[float, str]:
         if fixed_pitch_deg is not None:
@@ -852,10 +858,11 @@ def _sample_orbit_camera_sequence(
 
         theta = start + arc * phase
         sampled_pitch_deg, pitch_bucket = sample_pitch(frame_index)
-        print(
-            f"[INFO] orbit_pitch_sampled_deg frame={frame_index} "
-            f"bucket={pitch_bucket} pitch={sampled_pitch_deg:.2f}"
-        )
+        if verbose_debug:
+            print(
+                f"[DEBUG] orbit_pitch_sampled_deg frame={frame_index} "
+                f"bucket={pitch_bucket} pitch={sampled_pitch_deg:.2f}"
+            )
         horizontal = distance * math.cos(math.radians(sampled_pitch_deg))
         height = distance * math.sin(math.radians(sampled_pitch_deg))
         location = np.array(
@@ -867,7 +874,8 @@ def _sample_orbit_camera_sequence(
             dtype=float,
         )
         camera_distance = float(np.linalg.norm(location - np.asarray(focus_center, dtype=float)))
-        print(f"[INFO] orbit_camera_distance_m frame={frame_index} distance={camera_distance:.4f}")
+        if verbose_debug:
+            print(f"[DEBUG] orbit_camera_distance_m frame={frame_index} distance={camera_distance:.4f}")
         poi = np.asarray(focus_center, dtype=float)
         rotation_matrix = bproc.camera.rotation_from_forward_vec(poi - location, inplane_rot=roll)
         cam2world_mats.append(bproc.math.build_transformation_mat(location, rotation_matrix))
@@ -903,6 +911,7 @@ def _sample_camera_sequence(
             args.orbit_start_deg,
             args.orbit_roll_deg,
             jacket_top_z,
+            args.verbose_debug,
         )
     return _sample_head_camera_sequence(frame_count, np, bproc, focus_center)
 
@@ -1120,8 +1129,6 @@ def render_wrist_scene(
             Vector,
         )
         _decimate_render_template(jacket_obj, args.jacket_decimate_ratio, bpy, "Jacket")
-        if args.jacket_use_scene_material:
-            jacket_obj.replace_materials(cc_materials[0])
         jacket_top_z, jacket_bottom_z = _place_jacket_background(
             jacket_obj,
             args.jacket_top_z,
@@ -1135,8 +1142,7 @@ def render_wrist_scene(
             "[INFO] Jacket background enabled: "
             f"glb={args.jacket_glb} top_z={jacket_top_z:.4f}m "
             f"bottom_z={jacket_bottom_z:.4f}m ground_z={room_floor_z:.4f}m "
-            f"front_up_axis={args.jacket_front_up_axis} "
-            f"use_scene_material={args.jacket_use_scene_material}"
+            f"front_up_axis={args.jacket_front_up_axis}"
         )
     _configure_room_materials(room_planes, selected_room_material, Vector, args.room_uv_tile_size)
     print(
@@ -1166,9 +1172,11 @@ def render_wrist_scene(
         Euler,
         Vector,
         bpy,
+        args.verbose_debug,
     )
     bpy.context.view_layer.update()
-    _print_scene_debug(target_bop_objs, wrist_objs, jacket_obj, jacket_top_z, Vector, np)
+    if args.verbose_debug:
+        _print_scene_debug(target_bop_objs, wrist_objs, jacket_obj, jacket_top_z, Vector, np)
     focus_center = _scene_focus_center(target_bop_objs, wrist_objs, np)
 
     bproc.renderer.enable_depth_output(activate_antialiasing=False)
@@ -1317,7 +1325,6 @@ def main() -> int:
         "jacket_size_scale": args.jacket_size_scale,
         "jacket_top_z": args.jacket_top_z,
         "jacket_front_up_axis": args.jacket_front_up_axis,
-        "jacket_use_scene_material": args.jacket_use_scene_material,
         "orbit_distance": args.orbit_distance if args.orbit_distance is not None else args.orbit_radius,
         "orbit_pitch_sample_mode": args.orbit_pitch_sample_mode,
         "orbit_high_pitch_prob": args.orbit_high_pitch_prob,
