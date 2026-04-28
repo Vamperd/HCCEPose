@@ -20,7 +20,9 @@ WRIST_DECIMATE_RATIO="${WRIST_DECIMATE_RATIO:-0.25}"
 RENDER_SAMPLES="${RENDER_SAMPLES:-32}"
 CAMERA_MODE="${CAMERA_MODE:-orbit}"
 ORBIT_RADIUS="${ORBIT_RADIUS:-0.55}"
-ORBIT_PITCH_DEG="${ORBIT_PITCH_DEG:-50}"
+ORBIT_PITCH_DEG="${ORBIT_PITCH_DEG:-}"
+ORBIT_PITCH_MIN_DEG="${ORBIT_PITCH_MIN_DEG:-20}"
+ORBIT_PITCH_MAX_DEG="${ORBIT_PITCH_MAX_DEG:-60}"
 ORBIT_ARC_DEG="${ORBIT_ARC_DEG:-360}"
 ORBIT_ROLL_DEG="${ORBIT_ROLL_DEG:-0}"
 
@@ -67,10 +69,20 @@ echo "[INFO] WRIST_DECIMATE_RATIO=${WRIST_DECIMATE_RATIO}"
 echo "[INFO] RENDER_SAMPLES=${RENDER_SAMPLES}"
 echo "[INFO] CAMERA_MODE=${CAMERA_MODE}"
 echo "[INFO] ORBIT_RADIUS=${ORBIT_RADIUS}"
-echo "[INFO] ORBIT_PITCH_DEG=${ORBIT_PITCH_DEG}"
+echo "[INFO] ORBIT_PITCH_DEG=${ORBIT_PITCH_DEG:-random}"
+echo "[INFO] ORBIT_PITCH_MIN_DEG=${ORBIT_PITCH_MIN_DEG}"
+echo "[INFO] ORBIT_PITCH_MAX_DEG=${ORBIT_PITCH_MAX_DEG}"
 echo "[INFO] ORBIT_ARC_DEG=${ORBIT_ARC_DEG}"
 echo "[INFO] ORBIT_ROLL_DEG=${ORBIT_ROLL_DEG}"
 echo "[INFO] MATERIAL_RANGE=[${MATERIAL_START}, ${MATERIAL_STOP})"
+
+orbit_pitch_args=()
+if [[ -n "${ORBIT_PITCH_DEG}" ]]; then
+    orbit_pitch_args+=(--orbit-pitch-deg "${ORBIT_PITCH_DEG}")
+else
+    orbit_pitch_args+=(--orbit-pitch-min-deg "${ORBIT_PITCH_MIN_DEG}")
+    orbit_pitch_args+=(--orbit-pitch-max-deg "${ORBIT_PITCH_MAX_DEG}")
+fi
 
 for (( material_index=MATERIAL_START; material_index<MATERIAL_STOP; material_index++ )); do
     echo "[INFO] Starting wrist material index ${material_index}"
@@ -89,7 +101,7 @@ for (( material_index=MATERIAL_START; material_index<MATERIAL_STOP; material_ind
         --render-samples "${RENDER_SAMPLES}" \
         --camera-mode "${CAMERA_MODE}" \
         --orbit-radius "${ORBIT_RADIUS}" \
-        --orbit-pitch-deg "${ORBIT_PITCH_DEG}" \
+        "${orbit_pitch_args[@]}" \
         --orbit-arc-deg "${ORBIT_ARC_DEG}" \
         --orbit-roll-deg "${ORBIT_ROLL_DEG}" \
         --material-index "${material_index}" \

@@ -148,8 +148,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--orbit-pitch-deg",
         type=float,
-        default=50.0,
-        help="Fixed downward pitch angle in degrees, measured from horizontal toward the subject.",
+        default=None,
+        help=(
+            "Optional fixed downward pitch angle in degrees. If omitted, orbit mode "
+            "samples one pitch per scene from --orbit-pitch-min-deg to --orbit-pitch-max-deg."
+        ),
+    )
+    parser.add_argument(
+        "--orbit-pitch-min-deg",
+        type=float,
+        default=20.0,
+        help="Minimum random orbit pitch angle in degrees when --orbit-pitch-deg is omitted.",
+    )
+    parser.add_argument(
+        "--orbit-pitch-max-deg",
+        type=float,
+        default=60.0,
+        help="Maximum random orbit pitch angle in degrees when --orbit-pitch-deg is omitted.",
     )
     parser.add_argument(
         "--orbit-arc-deg",
@@ -506,7 +521,9 @@ def _sample_orbit_camera_sequence(
     bproc: Any,
     focus_center: Any,
     radius: float,
-    pitch_deg: float,
+    pitch_deg: float | None,
+    pitch_min_deg: float,
+    pitch_max_deg: float,
     arc_deg: float,
     start_deg: float | None,
     roll_deg: float,
@@ -515,8 +532,16 @@ def _sample_orbit_camera_sequence(
         return []
     if radius <= 0.0:
         raise ValueError(f"--orbit-radius must be positive, got {radius}")
+    if pitch_min_deg <= 0.0 or pitch_max_deg >= 89.0 or pitch_min_deg > pitch_max_deg:
+        raise ValueError(
+            "--orbit-pitch-min-deg and --orbit-pitch-max-deg must satisfy "
+            f"0 < min <= max < 89, got min={pitch_min_deg}, max={pitch_max_deg}"
+        )
+    if pitch_deg is None:
+        pitch_deg = float(np.random.uniform(pitch_min_deg, pitch_max_deg))
     if pitch_deg <= 0.0 or pitch_deg >= 89.0:
         raise ValueError(f"--orbit-pitch-deg must be in (0, 89), got {pitch_deg}")
+    print(f"[INFO] orbit_pitch_sampled_deg={pitch_deg:.2f}")
 
     start = math.radians(float(np.random.uniform(0.0, 360.0) if start_deg is None else start_deg))
     arc = math.radians(arc_deg)
@@ -557,6 +582,8 @@ def _sample_camera_sequence(args: argparse.Namespace, frame_count: int, np: Any,
             focus_center,
             args.orbit_radius,
             args.orbit_pitch_deg,
+            args.orbit_pitch_min_deg,
+            args.orbit_pitch_max_deg,
             args.orbit_arc_deg,
             args.orbit_start_deg,
             args.orbit_roll_deg,
@@ -775,7 +802,9 @@ def render_wrist_scene(
     print(
         "[INFO] camera_mode="
         f"{args.camera_mode} orbit_radius={args.orbit_radius:.3f}m "
-        f"orbit_pitch={args.orbit_pitch_deg:.2f}deg orbit_arc={args.orbit_arc_deg:.2f}deg"
+        f"orbit_pitch={args.orbit_pitch_deg if args.orbit_pitch_deg is not None else 'random'} "
+        f"orbit_pitch_range=({args.orbit_pitch_min_deg:.2f}, {args.orbit_pitch_max_deg:.2f})deg "
+        f"orbit_arc={args.orbit_arc_deg:.2f}deg"
     )
     for cam2world_matrix in _sample_camera_sequence(args, args.views_per_scene, np, bproc, focus_center):
         if bproc.camera.perform_obstacle_in_view_check(cam2world_matrix, {"min": 0.25}, bop_bvh_tree):
