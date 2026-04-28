@@ -22,6 +22,10 @@ WRIST_DECIMATE_RATIO="${WRIST_DECIMATE_RATIO:-0.25}"
 JACKET_SIZE_SCALE="${JACKET_SIZE_SCALE:-1.0}"
 JACKET_DECIMATE_RATIO="${JACKET_DECIMATE_RATIO:-0.10}"
 JACKET_TOP_Z="${JACKET_TOP_Z:-0.02}"
+JACKET_FRONT_UP_AXIS="${JACKET_FRONT_UP_AXIS:-neg_y}"
+JACKET_USE_SCENE_MATERIAL="${JACKET_USE_SCENE_MATERIAL:-0}"
+ROOM_FLOOR_GAP="${ROOM_FLOOR_GAP:-0.03}"
+ROOM_UV_TILE_SIZE="${ROOM_UV_TILE_SIZE:-0.50}"
 TARGET_SIDE_UP_PROB="${TARGET_SIDE_UP_PROB:-0.8}"
 TARGET_SIDE_UP_AXIS="${TARGET_SIDE_UP_AXIS:-y}"
 RENDER_SAMPLES="${RENDER_SAMPLES:-32}"
@@ -85,6 +89,10 @@ echo "[INFO] WRIST_DECIMATE_RATIO=${WRIST_DECIMATE_RATIO}"
 echo "[INFO] JACKET_SIZE_SCALE=${JACKET_SIZE_SCALE}"
 echo "[INFO] JACKET_DECIMATE_RATIO=${JACKET_DECIMATE_RATIO}"
 echo "[INFO] JACKET_TOP_Z=${JACKET_TOP_Z}"
+echo "[INFO] JACKET_FRONT_UP_AXIS=${JACKET_FRONT_UP_AXIS}"
+echo "[INFO] JACKET_USE_SCENE_MATERIAL=${JACKET_USE_SCENE_MATERIAL}"
+echo "[INFO] ROOM_FLOOR_GAP=${ROOM_FLOOR_GAP}"
+echo "[INFO] ROOM_UV_TILE_SIZE=${ROOM_UV_TILE_SIZE}"
 echo "[INFO] TARGET_SIDE_UP_PROB=${TARGET_SIDE_UP_PROB}"
 echo "[INFO] TARGET_SIDE_UP_AXIS=${TARGET_SIDE_UP_AXIS}"
 echo "[INFO] RENDER_SAMPLES=${RENDER_SAMPLES}"
@@ -125,6 +133,13 @@ case "${JACKET_ENABLED}" in
         ;;
 esac
 
+jacket_material_args=(--jacket-use-scene-material)
+case "${JACKET_USE_SCENE_MATERIAL}" in
+    0|false|False|FALSE|no|No|NO)
+        jacket_material_args=(--no-jacket-use-scene-material)
+        ;;
+esac
+
 for (( material_index=MATERIAL_START; material_index<MATERIAL_STOP; material_index++ )); do
     echo "[INFO] Starting wrist material index ${material_index}"
     export EGL_DEVICE_ID="${GPU_ID}"
@@ -144,6 +159,10 @@ for (( material_index=MATERIAL_START; material_index<MATERIAL_STOP; material_ind
         --jacket-size-scale "${JACKET_SIZE_SCALE}" \
         --jacket-decimate-ratio "${JACKET_DECIMATE_RATIO}" \
         --jacket-top-z "${JACKET_TOP_Z}" \
+        --jacket-front-up-axis "${JACKET_FRONT_UP_AXIS}" \
+        "${jacket_material_args[@]}" \
+        --room-floor-gap "${ROOM_FLOOR_GAP}" \
+        --room-uv-tile-size "${ROOM_UV_TILE_SIZE}" \
         --target-side-up-prob "${TARGET_SIDE_UP_PROB}" \
         --target-side-up-axis "${TARGET_SIDE_UP_AXIS}" \
         --render-samples "${RENDER_SAMPLES}" \

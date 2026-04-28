@@ -145,6 +145,30 @@ def parse_args() -> argparse.Namespace:
         help="World z height in meters where the jacket top surface is placed.",
     )
     parser.add_argument(
+        "--jacket-front-up-axis",
+        choices=["pos_x", "neg_x", "pos_y", "neg_y", "pos_z", "neg_z"],
+        default="neg_y",
+        help="Local jacket axis treated as the front face normal and rotated to world +Z.",
+    )
+    parser.add_argument(
+        "--jacket-use-scene-material",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Apply the current background material package to the jacket surface.",
+    )
+    parser.add_argument(
+        "--room-floor-gap",
+        type=float,
+        default=0.03,
+        help="Vertical gap in meters between jacket top and the textured room floor.",
+    )
+    parser.add_argument(
+        "--room-uv-tile-size",
+        type=float,
+        default=0.50,
+        help="World-space meters per UV tile for textured room planes.",
+    )
+    parser.add_argument(
         "--wrist-decimate-ratio",
         type=float,
         default=0.25,
@@ -324,6 +348,41 @@ def _bbox_size_vector(obj: Any, Vector: Any, np: Any) -> Any:
     )
 
 
+def _apply_planar_uvs(obj: Any, Vector: Any, uv_tile_size: float) -> None:
+    if uv_tile_size <= 0.0:
+        raise ValueError(f"--room-uv-tile-size must be positive, got {uv_tile_size}")
+
+    blender_obj = _get_blender_object(obj)
+    mesh = blender_obj.data
+    if mesh is None or len(mesh.vertices) == 0:
+        return
+
+    world_coords = [blender_obj.matrix_world @ vertex.co for vertex in mesh.vertices]
+    spans = [
+        max(coord[axis] for coord in world_coords) - min(coord[axis] for coord in world_coords)
+        for axis in range(3)
+    ]
+    uv_axes = sorted(range(3), key=lambda axis: spans[axis], reverse=True)[:2]
+    uv_layer = mesh.uv_layers.get("UVMap") or mesh.uv_layers.new(name="UVMap")
+    mesh.uv_layers.active = uv_layer
+
+    for polygon in mesh.polygons:
+        for loop_index in polygon.loop_indices:
+            vertex_index = mesh.loops[loop_index].vertex_index
+            world_coord = blender_obj.matrix_world @ mesh.vertices[vertex_index].co
+            uv_layer.data[loop_index].uv = (
+                world_coord[uv_axes[0]] / uv_tile_size,
+                world_coord[uv_axes[1]] / uv_tile_size,
+            )
+    mesh.update()
+
+
+def _configure_room_materials(room_planes: list[Any], material: Any, Vector: Any, uv_tile_size: float) -> None:
+    for plane in room_planes:
+        _apply_planar_uvs(plane, Vector, uv_tile_size)
+        plane.replace_materials(material)
+
+
 def _import_centered_wrist_template(
     wrist_glb: Path,
     wrist_unit_scale: str,
@@ -465,13 +524,36 @@ def _decimate_render_template(render_template: Any, ratio: float, bpy: Any, labe
     blender_obj.hide_set(True)
 
 
-def _place_jacket_background(jacket_obj: Any, top_z: float, Vector: Any, bpy: Any) -> tuple[float, float]:
+def _axis_vector(axis_name: str, Vector: Any) -> Any:
+    values = {
+        "pos_x": (1.0, 0.0, 0.0),
+        "neg_x": (-1.0, 0.0, 0.0),
+        "pos_y": (0.0, 1.0, 0.0),
+        "neg_y": (0.0, -1.0, 0.0),
+        "pos_z": (0.0, 0.0, 1.0),
+        "neg_z": (0.0, 0.0, -1.0),
+    }
+    if axis_name not in values:
+        raise ValueError(f"Unsupported axis name: {axis_name}")
+    return Vector(values[axis_name])
+
+
+def _place_jacket_background(
+    jacket_obj: Any,
+    top_z: float,
+    front_up_axis: str,
+    Vector: Any,
+    bpy: Any,
+) -> tuple[float, float]:
     jacket_blender_obj = _get_blender_object(jacket_obj)
     jacket_obj.hide(False)
     jacket_blender_obj.hide_viewport = False
     jacket_blender_obj.hide_render = False
     jacket_blender_obj.hide_set(False)
     jacket_blender_obj.location = (0.0, 0.0, 0.0)
+    jacket_blender_obj.rotation_euler = _axis_vector(front_up_axis, Vector).rotation_difference(
+        Vector((0.0, 0.0, 1.0))
+    ).to_euler()
     bpy.context.view_layer.update()
 
     _, max_corner = _world_bbox(jacket_blender_obj, Vector)
@@ -897,7 +979,8 @@ def _print_scene_debug(
             f"top_z={jacket_top_z:.4f} bottom_z={float(min_corner.z):.4f} "
             f"hide_viewport={jacket_blender_obj.hide_viewport} "
             f"hide_render={jacket_blender_obj.hide_render} "
-            f"materials={len(jacket_blender_obj.data.materials)}"
+            f"materials={len(jacket_blender_obj.data.materials)} "
+            f"rotation={_format_vec(jacket_blender_obj.rotation_euler)}"
         )
     if target_extents and wrist_extents:
         ratio = float(np.mean(wrist_extents) / max(np.mean(target_extents), 1e-8))
@@ -974,8 +1057,7 @@ def render_wrist_scene(
         )
     if not cc_materials:
         raise RuntimeError(f"Failed to load material for index {material.index}: {material.name}")
-    for plane in room_planes:
-        plane.replace_materials(cc_materials[0])
+    selected_room_material = cc_materials[0]
 
     light_plane = bproc.object.create_primitive("PLANE", scale=[3, 3, 1], location=[0, 0, 10])
     light_plane.set_name("light_plane")
@@ -1038,18 +1120,31 @@ def render_wrist_scene(
             Vector,
         )
         _decimate_render_template(jacket_obj, args.jacket_decimate_ratio, bpy, "Jacket")
+        if args.jacket_use_scene_material:
+            jacket_obj.replace_materials(cc_materials[0])
         jacket_top_z, jacket_bottom_z = _place_jacket_background(
             jacket_obj,
             args.jacket_top_z,
+            args.jacket_front_up_axis,
             Vector,
             bpy,
         )
-        room_planes[0].set_location([0.0, 0.0, jacket_bottom_z - 0.02])
+        room_floor_z = jacket_top_z - args.room_floor_gap
+        room_planes[0].set_location([0.0, 0.0, room_floor_z])
         print(
             "[INFO] Jacket background enabled: "
             f"glb={args.jacket_glb} top_z={jacket_top_z:.4f}m "
-            f"bottom_z={jacket_bottom_z:.4f}m ground_z={jacket_bottom_z - 0.02:.4f}m"
+            f"bottom_z={jacket_bottom_z:.4f}m ground_z={room_floor_z:.4f}m "
+            f"front_up_axis={args.jacket_front_up_axis} "
+            f"use_scene_material={args.jacket_use_scene_material}"
         )
+    _configure_room_materials(room_planes, selected_room_material, Vector, args.room_uv_tile_size)
+    print(
+        "[INFO] Room material applied: "
+        f"material={material.name} planes={len(room_planes)} "
+        f"uv_tile_size={args.room_uv_tile_size:.3f}m "
+        f"floor_z={_get_blender_object(room_planes[0]).location.z:.4f}m"
+    )
 
     for obj in target_bop_objs:
         obj.set_shading_mode("auto")
@@ -1221,6 +1316,8 @@ def main() -> int:
         "jacket_glb": str(args.jacket_glb),
         "jacket_size_scale": args.jacket_size_scale,
         "jacket_top_z": args.jacket_top_z,
+        "jacket_front_up_axis": args.jacket_front_up_axis,
+        "jacket_use_scene_material": args.jacket_use_scene_material,
         "orbit_distance": args.orbit_distance if args.orbit_distance is not None else args.orbit_radius,
         "orbit_pitch_sample_mode": args.orbit_pitch_sample_mode,
         "orbit_high_pitch_prob": args.orbit_high_pitch_prob,
