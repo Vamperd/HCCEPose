@@ -139,6 +139,12 @@ def parse_args() -> argparse.Namespace:
         help="Additional multiplier for the jacket/background model after unit normalization.",
     )
     parser.add_argument(
+        "--jacket-xy-scale",
+        type=float,
+        default=0.75,
+        help="Horizontal footprint multiplier applied after jacket orientation. Lower values expose more floor.",
+    )
+    parser.add_argument(
         "--jacket-top-z",
         type=float,
         default=0.02,
@@ -153,8 +159,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--room-floor-gap",
         type=float,
-        default=0.03,
-        help="Vertical gap in meters between jacket top and the textured room floor.",
+        default=0.12,
+        help="Vertical gap in meters between jacket top and the textured room floor. Larger values expose more jacket above floor.",
     )
     parser.add_argument(
         "--room-uv-tile-size",
@@ -541,9 +547,13 @@ def _place_jacket_background(
     jacket_obj: Any,
     top_z: float,
     front_up_axis: str,
+    xy_scale: float,
     Vector: Any,
     bpy: Any,
 ) -> tuple[float, float]:
+    if xy_scale <= 0.0:
+        raise ValueError(f"--jacket-xy-scale must be positive, got {xy_scale}")
+
     jacket_blender_obj = _get_blender_object(jacket_obj)
     jacket_obj.hide(False)
     jacket_blender_obj.hide_viewport = False
@@ -554,6 +564,8 @@ def _place_jacket_background(
     rotation = _axis_vector(front_up_axis, Vector).rotation_difference(Vector((0.0, 0.0, 1.0)))
     for vertex in jacket_blender_obj.data.vertices:
         vertex.co = rotation @ vertex.co
+        vertex.co.x *= xy_scale
+        vertex.co.y *= xy_scale
     jacket_blender_obj.data.update()
     bpy.context.view_layer.update()
 
@@ -1133,6 +1145,7 @@ def render_wrist_scene(
             jacket_obj,
             args.jacket_top_z,
             args.jacket_front_up_axis,
+            args.jacket_xy_scale,
             Vector,
             bpy,
         )
@@ -1142,7 +1155,8 @@ def render_wrist_scene(
             "[INFO] Jacket background enabled: "
             f"glb={args.jacket_glb} top_z={jacket_top_z:.4f}m "
             f"bottom_z={jacket_bottom_z:.4f}m ground_z={room_floor_z:.4f}m "
-            f"front_up_axis={args.jacket_front_up_axis}"
+            f"front_up_axis={args.jacket_front_up_axis} "
+            f"xy_scale={args.jacket_xy_scale:.3f} exposed_height={args.room_floor_gap:.4f}m"
         )
     _configure_room_materials(room_planes, selected_room_material, Vector, args.room_uv_tile_size)
     print(
@@ -1323,6 +1337,7 @@ def main() -> int:
         "jacket_enabled": args.jacket_enabled,
         "jacket_glb": str(args.jacket_glb),
         "jacket_size_scale": args.jacket_size_scale,
+        "jacket_xy_scale": args.jacket_xy_scale,
         "jacket_top_z": args.jacket_top_z,
         "jacket_front_up_axis": args.jacket_front_up_axis,
         "orbit_distance": args.orbit_distance if args.orbit_distance is not None else args.orbit_radius,
