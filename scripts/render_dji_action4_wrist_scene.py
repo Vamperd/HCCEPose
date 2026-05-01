@@ -196,6 +196,48 @@ def parse_args() -> argparse.Namespace:
         help="Local target axis used for side-up poses. Use y by default; x is kept for validation.",
     )
     parser.add_argument(
+        "--pair-spacing",
+        type=float,
+        default=0.18,
+        help="Horizontal spacing in meters between DJI Action4+wrist pairs. Lower values keep pairs closer to the jacket center.",
+    )
+    parser.add_argument(
+        "--pair-center-x",
+        type=float,
+        default=0.0,
+        help="World x coordinate of the pair layout center on the jacket.",
+    )
+    parser.add_argument(
+        "--pair-center-y",
+        type=float,
+        default=-0.04,
+        help="World y coordinate of the pair layout center on the jacket. Larger values move the pair cluster closer to the jacket center/front-middle.",
+    )
+    parser.add_argument(
+        "--pair-center-z-offset",
+        type=float,
+        default=0.010,
+        help="Meters above jacket_top_z used as the pair layout center height.",
+    )
+    parser.add_argument(
+        "--pair-jitter-x",
+        type=float,
+        default=0.012,
+        help="Random x jitter in meters added around the pair center for each DJI Action4 anchor.",
+    )
+    parser.add_argument(
+        "--pair-jitter-y",
+        type=float,
+        default=0.020,
+        help="Random y jitter in meters added around the pair center for each DJI Action4 anchor.",
+    )
+    parser.add_argument(
+        "--pair-jitter-z",
+        type=float,
+        default=0.018,
+        help="Random z jitter in meters added around the pair center for each DJI Action4 anchor.",
+    )
+    parser.add_argument(
         "--render-samples",
         type=int,
         default=32,
@@ -643,6 +685,13 @@ def _set_pair_poses(
     jacket_top_z: float,
     target_side_up_prob: float,
     target_side_up_axis: str,
+    pair_spacing: float,
+    pair_center_x: float,
+    pair_center_y: float,
+    pair_center_z_offset: float,
+    pair_jitter_x: float,
+    pair_jitter_y: float,
+    pair_jitter_z: float,
     np: Any,
     Matrix: Any,
     Euler: Any,
@@ -651,16 +700,25 @@ def _set_pair_poses(
     verbose_debug: bool,
 ) -> None:
     count = len(target_bop_objs)
-    spacing = 0.26 if count > 1 else 0.0
-    start_x = -0.5 * spacing * (count - 1)
+    if pair_spacing < 0.0:
+        raise ValueError(f"--pair-spacing must be non-negative, got {pair_spacing}")
+    if pair_jitter_x < 0.0 or pair_jitter_y < 0.0 or pair_jitter_z < 0.0:
+        raise ValueError(
+            "--pair-jitter-x/--pair-jitter-y/--pair-jitter-z must be non-negative, "
+            f"got x={pair_jitter_x}, y={pair_jitter_y}, z={pair_jitter_z}"
+        )
+
+    spacing = pair_spacing if count > 1 else 0.0
+    start_x = pair_center_x - 0.5 * spacing * (count - 1)
+    center_z = jacket_top_z + pair_center_z_offset
 
     for index, (target, wrist) in enumerate(zip(target_bop_objs, wrist_objs)):
         side = -1.0 if index % 2 == 0 else 1.0
         location = np.array(
             [
-                start_x + index * spacing + np.random.uniform(-0.025, 0.025),
-                np.random.uniform(-0.18, -0.08),
-                jacket_top_z + np.random.uniform(0.060, 0.115),
+                start_x + index * spacing + np.random.uniform(-pair_jitter_x, pair_jitter_x),
+                pair_center_y + np.random.uniform(-pair_jitter_y, pair_jitter_y),
+                center_z + np.random.uniform(-pair_jitter_z, pair_jitter_z),
             ],
             dtype=float,
         )
@@ -1181,6 +1239,13 @@ def render_wrist_scene(
         jacket_top_z,
         args.target_side_up_prob,
         args.target_side_up_axis,
+        args.pair_spacing,
+        args.pair_center_x,
+        args.pair_center_y,
+        args.pair_center_z_offset,
+        args.pair_jitter_x,
+        args.pair_jitter_y,
+        args.pair_jitter_z,
         np,
         Matrix,
         Euler,
@@ -1189,6 +1254,13 @@ def render_wrist_scene(
         args.verbose_debug,
     )
     bpy.context.view_layer.update()
+    print(
+        "[INFO] pair_layout="
+        f"center=({args.pair_center_x:.3f}, {args.pair_center_y:.3f}, "
+        f"{jacket_top_z + args.pair_center_z_offset:.3f})m "
+        f"spacing={args.pair_spacing:.3f}m "
+        f"jitter=({args.pair_jitter_x:.3f}, {args.pair_jitter_y:.3f}, {args.pair_jitter_z:.3f})m"
+    )
     if args.verbose_debug:
         _print_scene_debug(target_bop_objs, wrist_objs, jacket_obj, jacket_top_z, Vector, np)
     focus_center = _scene_focus_center(target_bop_objs, wrist_objs, np)
@@ -1345,6 +1417,13 @@ def main() -> int:
         "orbit_high_pitch_prob": args.orbit_high_pitch_prob,
         "target_side_up_prob": args.target_side_up_prob,
         "target_side_up_axis": args.target_side_up_axis,
+        "pair_spacing": args.pair_spacing,
+        "pair_center_x": args.pair_center_x,
+        "pair_center_y": args.pair_center_y,
+        "pair_center_z_offset": args.pair_center_z_offset,
+        "pair_jitter_x": args.pair_jitter_x,
+        "pair_jitter_y": args.pair_jitter_y,
+        "pair_jitter_z": args.pair_jitter_z,
         "output_dataset_path": str(args.output_dataset_path),
     }
 
