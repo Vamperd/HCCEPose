@@ -1240,7 +1240,7 @@ def _raycast_corner_visibility(
         depsgraph,
         origin + direction * 1e-5,
         direction,
-        max(distance - ray_epsilon_m, 0.0),
+        distance=max(distance - ray_epsilon_m, 0.0),
     )
     if not hit:
         return 1, "visible"
