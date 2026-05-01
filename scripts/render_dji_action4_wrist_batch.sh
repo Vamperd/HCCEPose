@@ -28,6 +28,7 @@ JACKET_EXPOSED_HEIGHT="${JACKET_EXPOSED_HEIGHT:-0.3}"
 ROOM_FLOOR_GAP="${ROOM_FLOOR_GAP:-${JACKET_EXPOSED_HEIGHT}}"
 ROOM_UV_TILE_SIZE="${ROOM_UV_TILE_SIZE:-0.50}"
 TARGET_SIDE_UP_PROB="${TARGET_SIDE_UP_PROB:-0.8}"
+TARGET_BOTTOM_UP_PROB="${TARGET_BOTTOM_UP_PROB:-0.1}"
 TARGET_SIDE_UP_AXIS="${TARGET_SIDE_UP_AXIS:-y}"
 RENDER_SAMPLES="${RENDER_SAMPLES:-2048}"
 CAMERA_MODE="${CAMERA_MODE:-orbit}"
@@ -44,6 +45,10 @@ ORBIT_LOW_PITCH_MIN_DEG="${ORBIT_LOW_PITCH_MIN_DEG:-0}"
 ORBIT_LOW_PITCH_MAX_DEG="${ORBIT_LOW_PITCH_MAX_DEG:-50}"
 ORBIT_ARC_DEG="${ORBIT_ARC_DEG:-360}"
 ORBIT_ROLL_DEG="${ORBIT_ROLL_DEG:-0}"
+CORNER_VISIBILITY_ENABLED="${CORNER_VISIBILITY_ENABLED:-1}"
+CORNER_DEBUG_VIS="${CORNER_DEBUG_VIS:-0}"
+CORNER_DEBUG_VIS_MAX_FRAMES="${CORNER_DEBUG_VIS_MAX_FRAMES:-5}"
+CORNER_RAY_EPSILON_M="${CORNER_RAY_EPSILON_M:-0.001}"
 
 if [[ ! "${MATERIAL_START}" =~ ^[0-9]+$ ]]; then
     echo "[ERROR] MATERIAL_START must be a non-negative integer: ${MATERIAL_START}" >&2
@@ -96,6 +101,7 @@ echo "[INFO] JACKET_EXPOSED_HEIGHT=${JACKET_EXPOSED_HEIGHT}"
 echo "[INFO] ROOM_FLOOR_GAP=${ROOM_FLOOR_GAP}"
 echo "[INFO] ROOM_UV_TILE_SIZE=${ROOM_UV_TILE_SIZE}"
 echo "[INFO] TARGET_SIDE_UP_PROB=${TARGET_SIDE_UP_PROB}"
+echo "[INFO] TARGET_BOTTOM_UP_PROB=${TARGET_BOTTOM_UP_PROB}"
 echo "[INFO] TARGET_SIDE_UP_AXIS=${TARGET_SIDE_UP_AXIS}"
 echo "[INFO] RENDER_SAMPLES=${RENDER_SAMPLES}"
 echo "[INFO] CAMERA_MODE=${CAMERA_MODE}"
@@ -112,6 +118,10 @@ echo "[INFO] ORBIT_LOW_PITCH_MIN_DEG=${ORBIT_LOW_PITCH_MIN_DEG}"
 echo "[INFO] ORBIT_LOW_PITCH_MAX_DEG=${ORBIT_LOW_PITCH_MAX_DEG}"
 echo "[INFO] ORBIT_ARC_DEG=${ORBIT_ARC_DEG}"
 echo "[INFO] ORBIT_ROLL_DEG=${ORBIT_ROLL_DEG}"
+echo "[INFO] CORNER_VISIBILITY_ENABLED=${CORNER_VISIBILITY_ENABLED}"
+echo "[INFO] CORNER_DEBUG_VIS=${CORNER_DEBUG_VIS}"
+echo "[INFO] CORNER_DEBUG_VIS_MAX_FRAMES=${CORNER_DEBUG_VIS_MAX_FRAMES}"
+echo "[INFO] CORNER_RAY_EPSILON_M=${CORNER_RAY_EPSILON_M}"
 echo "[INFO] MATERIAL_RANGE=[${MATERIAL_START}, ${MATERIAL_STOP})"
 
 orbit_pitch_args=()
@@ -132,6 +142,20 @@ jacket_enabled_args=(--jacket-enabled)
 case "${JACKET_ENABLED}" in
     0|false|False|FALSE|no|No|NO)
         jacket_enabled_args=(--no-jacket-enabled)
+        ;;
+esac
+
+corner_visibility_args=(--corner-visibility-enabled)
+case "${CORNER_VISIBILITY_ENABLED}" in
+    0|false|False|FALSE|no|No|NO)
+        corner_visibility_args=(--no-corner-visibility-enabled)
+        ;;
+esac
+
+corner_debug_args=()
+case "${CORNER_DEBUG_VIS}" in
+    1|true|True|TRUE|yes|Yes|YES)
+        corner_debug_args=(--corner-debug-vis)
         ;;
 esac
 
@@ -159,6 +183,7 @@ for (( material_index=MATERIAL_START; material_index<MATERIAL_STOP; material_ind
         --room-floor-gap "${ROOM_FLOOR_GAP}" \
         --room-uv-tile-size "${ROOM_UV_TILE_SIZE}" \
         --target-side-up-prob "${TARGET_SIDE_UP_PROB}" \
+        --target-bottom-up-prob "${TARGET_BOTTOM_UP_PROB}" \
         --target-side-up-axis "${TARGET_SIDE_UP_AXIS}" \
         --render-samples "${RENDER_SAMPLES}" \
         --camera-mode "${CAMERA_MODE}" \
@@ -167,6 +192,10 @@ for (( material_index=MATERIAL_START; material_index<MATERIAL_STOP; material_ind
         "${orbit_pitch_args[@]}" \
         --orbit-arc-deg "${ORBIT_ARC_DEG}" \
         --orbit-roll-deg "${ORBIT_ROLL_DEG}" \
+        "${corner_visibility_args[@]}" \
+        "${corner_debug_args[@]}" \
+        --corner-debug-vis-max-frames "${CORNER_DEBUG_VIS_MAX_FRAMES}" \
+        --corner-ray-epsilon-m "${CORNER_RAY_EPSILON_M}" \
         --material-index "${material_index}" \
         --skip-done
 done

@@ -190,6 +190,15 @@ def parse_args() -> argparse.Namespace:
         help="Probability that each DJI target is placed with its local left/right side facing upward.",
     )
     parser.add_argument(
+        "--target-bottom-up-prob",
+        type=float,
+        default=0.0,
+        help=(
+            "Probability that each DJI target is placed bottom-up. The remaining "
+            "probability after side-up and bottom-up becomes top-up."
+        ),
+    )
+    parser.add_argument(
         "--target-side-up-axis",
         choices=["x", "y"],
         default="y",
@@ -247,6 +256,29 @@ def parse_args() -> argparse.Namespace:
         "--verbose-debug",
         action="store_true",
         help="Print per-frame camera and per-object pose diagnostics.",
+    )
+    parser.add_argument(
+        "--corner-visibility-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Write train_pbr/<chunk>/scene_gt_corners.json with projected bbox-corner visibility.",
+    )
+    parser.add_argument(
+        "--corner-ray-epsilon-m",
+        type=float,
+        default=0.001,
+        help="Raycast margin in meters used when testing whether geometry sits in front of a bbox corner.",
+    )
+    parser.add_argument(
+        "--corner-debug-vis",
+        action="store_true",
+        help="Write debug RGB images with only visible corners drawn.",
+    )
+    parser.add_argument(
+        "--corner-debug-vis-max-frames",
+        type=int,
+        default=5,
+        help="Maximum number of per-scene corner debug images to write when --corner-debug-vis is set.",
     )
     parser.add_argument(
         "--camera-mode",
@@ -684,6 +716,7 @@ def _set_pair_poses(
     occlusion_profile: str,
     jacket_top_z: float,
     target_side_up_prob: float,
+    target_bottom_up_prob: float,
     target_side_up_axis: str,
     pair_spacing: float,
     pair_center_x: float,
@@ -727,7 +760,15 @@ def _set_pair_poses(
         roll = math.radians(side * np.random.uniform(5.0, 18.0))
         wrist_anchor_rotation = Euler((pitch, roll, yaw), "XYZ").to_matrix().to_4x4()
         target_side_up_prob = min(max(float(target_side_up_prob), 0.0), 1.0)
-        if np.random.random() < target_side_up_prob:
+        target_bottom_up_prob = min(max(float(target_bottom_up_prob), 0.0), 1.0)
+        if target_side_up_prob + target_bottom_up_prob > 1.0:
+            raise ValueError(
+                "--target-side-up-prob + --target-bottom-up-prob must be <= 1.0, "
+                f"got {target_side_up_prob + target_bottom_up_prob:.3f}"
+            )
+
+        orientation_sample = float(np.random.random())
+        if orientation_sample < target_side_up_prob:
             side_up_sign = -1.0 if np.random.random() < 0.5 else 1.0
             orientation_category = "left_side_up" if side_up_sign < 0.0 else "right_side_up"
             side_tilt = math.radians(side_up_sign * 90.0 + np.random.uniform(-8.0, 8.0))
@@ -738,6 +779,21 @@ def _set_pair_poses(
                 @ Euler(
                     (
                         math.radians(np.random.uniform(-7.0, 7.0)),
+                        math.radians(np.random.uniform(-5.0, 5.0)),
+                        math.radians(np.random.uniform(-6.0, 6.0)),
+                    ),
+                    "XYZ",
+                ).to_matrix().to_4x4()
+            )
+            rotation_euler = target_rotation_matrix.to_euler()
+        elif orientation_sample < target_side_up_prob + target_bottom_up_prob:
+            orientation_category = "bottom_up"
+            target_rotation_matrix = (
+                Matrix.Rotation(yaw, 4, "Z")
+                @ Matrix.Rotation(math.radians(180.0 + np.random.uniform(-8.0, 8.0)), 4, "X")
+                @ Euler(
+                    (
+                        math.radians(np.random.uniform(-5.0, 5.0)),
                         math.radians(np.random.uniform(-5.0, 5.0)),
                         math.radians(np.random.uniform(-6.0, 6.0)),
                     ),
@@ -1066,6 +1122,324 @@ def _print_scene_debug(
         print(f"[INFO] wrist_target_extent_ratio={ratio:.3f}")
 
 
+def _bbox_corners_from_models_info(models_info_path: Path, object_id: int, np: Any) -> tuple[Any, Any]:
+    with models_info_path.open("r", encoding="utf-8") as handle:
+        models_info = json.load(handle)
+
+    info = models_info.get(str(object_id))
+    if info is None:
+        raise KeyError(f"Object id {object_id} is missing from {models_info_path}")
+
+    min_corner = np.asarray(
+        [info["min_x"], info["min_y"], info["min_z"]],
+        dtype=float,
+    )
+    size = np.asarray(
+        [info["size_x"], info["size_y"], info["size_z"]],
+        dtype=float,
+    )
+    max_corner = min_corner + size
+    corners_mm = np.asarray(
+        [
+            [x, y, z]
+            for x in (min_corner[0], max_corner[0])
+            for y in (min_corner[1], max_corner[1])
+            for z in (min_corner[2], max_corner[2])
+        ],
+        dtype=float,
+    )
+    return corners_mm, corners_mm / 1000.0
+
+
+def _matrix_from_cam2world(cam2world_matrix: Any, Matrix: Any) -> Any:
+    if hasattr(cam2world_matrix, "to_4x4"):
+        return cam2world_matrix.to_4x4()
+    if hasattr(cam2world_matrix, "tolist"):
+        return Matrix(cam2world_matrix.tolist())
+    return Matrix(cam2world_matrix)
+
+
+def _project_corners_from_bop(
+    corners_mm: Any,
+    scene_camera_entry: dict[str, Any],
+    scene_gt_entry: dict[str, Any],
+    np: Any,
+) -> tuple[list[list[float | None]], list[float | None], list[bool]]:
+    cam_k = np.asarray(scene_camera_entry["cam_K"], dtype=float).reshape(3, 3)
+    rotation = np.asarray(scene_gt_entry["cam_R_m2c"], dtype=float).reshape(3, 3)
+    translation = np.asarray(scene_gt_entry["cam_t_m2c"], dtype=float).reshape(3, 1)
+    corners_cam = (rotation @ corners_mm.T + translation).T
+
+    corners_2d: list[list[float | None]] = []
+    corners_depth: list[float | None] = []
+    positive_depth: list[bool] = []
+    for corner_cam in corners_cam:
+        z_mm = float(corner_cam[2])
+        if z_mm <= 1e-8:
+            corners_2d.append([None, None])
+            corners_depth.append(None)
+            positive_depth.append(False)
+            continue
+
+        u = float(cam_k[0, 0] * corner_cam[0] / z_mm + cam_k[0, 2])
+        v = float(cam_k[1, 1] * corner_cam[1] / z_mm + cam_k[1, 2])
+        corners_2d.append([u, v])
+        corners_depth.append(z_mm / 1000.0)
+        positive_depth.append(True)
+    return corners_2d, corners_depth, positive_depth
+
+
+def _classify_hit_object(
+    hit_object: Any,
+    current_target_object: Any,
+    target_object_ids: set[int],
+    wrist_object_ids: set[int],
+    jacket_object_ids: set[int],
+) -> str:
+    if hit_object is None:
+        return "none"
+    hit_id = id(hit_object)
+    hit_name = getattr(hit_object, "name", "")
+    current_name = getattr(current_target_object, "name", "")
+    if hit_object is current_target_object or hit_name == current_name:
+        return "self"
+    if hit_id in wrist_object_ids or hit_name.startswith("wrist_occluder"):
+        return "wrist"
+    if hit_id in jacket_object_ids or hit_name.startswith("jacket_background"):
+        return "jacket"
+    if hit_id in target_object_ids or "obj_000001" in hit_name:
+        return "other_dji"
+    return "scene"
+
+
+def _raycast_corner_visibility(
+    corner_world: Any,
+    cam2world_matrix: Any,
+    current_target_object: Any,
+    target_object_ids: set[int],
+    wrist_object_ids: set[int],
+    jacket_object_ids: set[int],
+    ray_epsilon_m: float,
+    bpy: Any,
+    Vector: Any,
+    Matrix: Any,
+) -> tuple[int, str]:
+    if ray_epsilon_m < 0.0:
+        raise ValueError(f"--corner-ray-epsilon-m must be non-negative, got {ray_epsilon_m}")
+
+    cam_matrix = _matrix_from_cam2world(cam2world_matrix, Matrix)
+    origin = cam_matrix.translation
+    ray = corner_world - origin
+    distance = float(ray.length)
+    if distance <= ray_epsilon_m:
+        return 0, "outside"
+
+    direction = ray.normalized()
+    depsgraph = bpy.context.evaluated_depsgraph_get()
+    hit, _, _, _, hit_object, _ = bpy.context.scene.ray_cast(
+        depsgraph,
+        origin + direction * 1e-5,
+        direction,
+        max(distance - ray_epsilon_m, 0.0),
+    )
+    if not hit:
+        return 1, "visible"
+    return 0, _classify_hit_object(
+        hit_object,
+        current_target_object,
+        target_object_ids,
+        wrist_object_ids,
+        jacket_object_ids,
+    )
+
+
+def _draw_corner_debug_image(
+    image_rgb: Any,
+    frame_records: list[dict[str, Any]],
+    output_path: Path,
+) -> None:
+    try:
+        import cv2
+    except ImportError as exc:
+        raise RuntimeError("--corner-debug-vis requires cv2 to be available in the render environment.") from exc
+
+    image = image_rgb.copy()
+    if image.dtype.name != "uint8":
+        image = image * 255.0 if float(image.max()) <= 1.0 else image
+        image = image.clip(0, 255).astype("uint8")
+    image_bgr = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+    height, width = image_bgr.shape[:2]
+    for record in frame_records:
+        for corner_index, (corner_2d, visible) in enumerate(
+            zip(record["corners_2d"], record["corners_visible"])
+        ):
+            if int(visible) != 1:
+                continue
+            u, v = corner_2d
+            if u is None or v is None:
+                continue
+            x = int(round(float(u)))
+            y = int(round(float(v)))
+            if x < 0 or y < 0 or x >= width or y >= height:
+                continue
+            cv2.circle(image_bgr, (x, y), 4, (0, 255, 0), thickness=-1, lineType=cv2.LINE_AA)
+            cv2.putText(
+                image_bgr,
+                str(corner_index),
+                (x + 5, y - 5),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.45,
+                (0, 255, 0),
+                1,
+                cv2.LINE_AA,
+            )
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    cv2.imwrite(os.fspath(output_path), image_bgr)
+
+
+def _write_corner_visibility_sidecar(
+    args: argparse.Namespace,
+    output_dataset_path: Path,
+    target_bop_objs: list[Any],
+    wrist_objs: list[Any],
+    jacket_obj: Any | None,
+    cam2world_mats: list[Any],
+    rendered_colors: Any,
+    bpy: Any,
+    np: Any,
+    Vector: Any,
+    Matrix: Any,
+) -> None:
+    if not args.corner_visibility_enabled:
+        return
+
+    chunk_id, frame_start, _ = expected_slot(
+        args.material_index,
+        args.views_per_scene,
+        args.frames_per_chunk,
+    )
+    chunk_dir = output_dataset_path / "train_pbr" / f"{chunk_id:06d}"
+    scene_gt_path = chunk_dir / "scene_gt.json"
+    scene_camera_path = chunk_dir / "scene_camera.json"
+    corners_path = chunk_dir / "scene_gt_corners.json"
+    if not scene_gt_path.is_file() or not scene_camera_path.is_file():
+        raise FileNotFoundError(
+            f"Cannot write corner visibility because {scene_gt_path.name} or "
+            f"{scene_camera_path.name} is missing in {chunk_dir}"
+        )
+
+    with scene_gt_path.open("r", encoding="utf-8") as handle:
+        scene_gt = json.load(handle)
+    with scene_camera_path.open("r", encoding="utf-8") as handle:
+        scene_camera = json.load(handle)
+
+    corners_mm, corners_m = _bbox_corners_from_models_info(
+        output_dataset_path / "models" / "models_info.json",
+        args.object_id,
+        np,
+    )
+    width = int(bpy.context.scene.render.resolution_x)
+    height = int(bpy.context.scene.render.resolution_y)
+    bpy.context.view_layer.update()
+
+    target_blender_objs = [_get_blender_object(obj) for obj in target_bop_objs]
+    wrist_blender_objs = [_get_blender_object(obj) for obj in wrist_objs]
+    jacket_blender_objs = [_get_blender_object(jacket_obj)] if jacket_obj is not None else []
+    target_object_ids = {id(obj) for obj in target_blender_objs}
+    wrist_object_ids = {id(obj) for obj in wrist_blender_objs}
+    jacket_object_ids = {id(obj) for obj in jacket_blender_objs}
+
+    if corners_path.is_file():
+        with corners_path.open("r", encoding="utf-8") as handle:
+            sidecar = json.load(handle)
+    else:
+        sidecar = {}
+
+    debug_frames_written = 0
+    for local_frame_index, cam2world_matrix in enumerate(cam2world_mats):
+        frame_id = frame_start + local_frame_index
+        frame_key = str(frame_id)
+        if frame_key not in scene_gt or frame_key not in scene_camera:
+            raise KeyError(f"Missing frame {frame_key} in BOP metadata under {chunk_dir}")
+
+        frame_records: list[dict[str, Any]] = []
+        for obj_index, (target, target_blender_obj) in enumerate(
+            zip(target_bop_objs, target_blender_objs)
+        ):
+            if obj_index >= len(scene_gt[frame_key]):
+                raise IndexError(
+                    f"Frame {frame_key} has fewer scene_gt entries than target objects."
+                )
+            gt_entry = scene_gt[frame_key][obj_index]
+            corners_2d, corners_depth, positive_depth = _project_corners_from_bop(
+                corners_mm,
+                scene_camera[frame_key],
+                gt_entry,
+                np,
+            )
+
+            corners_visible: list[int] = []
+            corners_occ_type: list[str] = []
+            for corner_index, corner_m in enumerate(corners_m):
+                corner_2d = corners_2d[corner_index]
+                in_image = (
+                    positive_depth[corner_index]
+                    and corner_2d[0] is not None
+                    and corner_2d[1] is not None
+                    and 0.0 <= float(corner_2d[0]) < width
+                    and 0.0 <= float(corner_2d[1]) < height
+                )
+                if not in_image:
+                    corners_visible.append(0)
+                    corners_occ_type.append("outside")
+                    continue
+
+                corner_world = target_blender_obj.matrix_world @ Vector(corner_m.tolist())
+                visible, occ_type = _raycast_corner_visibility(
+                    corner_world,
+                    cam2world_matrix,
+                    target_blender_obj,
+                    target_object_ids,
+                    wrist_object_ids,
+                    jacket_object_ids,
+                    args.corner_ray_epsilon_m,
+                    bpy,
+                    Vector,
+                    Matrix,
+                )
+                corners_visible.append(int(visible))
+                corners_occ_type.append(occ_type)
+
+            frame_records.append(
+                {
+                    "obj_id": int(gt_entry.get("obj_id", args.object_id)),
+                    "corners_2d": corners_2d,
+                    "corners_depth": corners_depth,
+                    "corners_visible": corners_visible,
+                    "corners_occ_type": corners_occ_type,
+                }
+            )
+
+        sidecar[frame_key] = frame_records
+
+        if (
+            args.corner_debug_vis
+            and rendered_colors is not None
+            and debug_frames_written < args.corner_debug_vis_max_frames
+        ):
+            debug_path = chunk_dir / "corner_debug" / f"{frame_id:06d}.jpg"
+            _draw_corner_debug_image(rendered_colors[local_frame_index], frame_records, debug_path)
+            debug_frames_written += 1
+
+    with corners_path.open("w", encoding="utf-8") as handle:
+        json.dump(sidecar, handle, ensure_ascii=True, indent=2)
+        handle.write("\n")
+    print(
+        "[INFO] Corner visibility sidecar written: "
+        f"{corners_path} frames={len(cam2world_mats)} debug_images={debug_frames_written}"
+    )
+
+
 def render_wrist_scene(
     args: argparse.Namespace,
     material: Any,
@@ -1238,6 +1612,7 @@ def render_wrist_scene(
         args.occlusion_profile,
         jacket_top_z,
         args.target_side_up_prob,
+        args.target_bottom_up_prob,
         args.target_side_up_axis,
         args.pair_spacing,
         args.pair_center_x,
@@ -1274,6 +1649,7 @@ def render_wrist_scene(
 
     bop_bvh_tree = bproc.object.create_bvh_tree_multi_objects(target_bop_objs)
     cam_poses = 0
+    accepted_cam2world_mats: list[Any] = []
     orbit_distance = args.orbit_distance if args.orbit_distance is not None else args.orbit_radius
     print(
         "[INFO] camera_mode="
@@ -1297,6 +1673,7 @@ def render_wrist_scene(
     ):
         if bproc.camera.perform_obstacle_in_view_check(cam2world_matrix, {"min": 0.25}, bop_bvh_tree):
             bproc.camera.add_camera_pose(cam2world_matrix, frame=cam_poses)
+            accepted_cam2world_mats.append(cam2world_matrix)
             cam_poses += 1
 
     attempts = 0
@@ -1312,6 +1689,7 @@ def render_wrist_scene(
         )[0]
         if bproc.camera.perform_obstacle_in_view_check(fallback_matrix, {"min": 0.25}, bop_bvh_tree):
             bproc.camera.add_camera_pose(fallback_matrix, frame=cam_poses)
+            accepted_cam2world_mats.append(fallback_matrix)
             cam_poses += 1
     if cam_poses != args.views_per_scene:
         raise RuntimeError(
@@ -1330,6 +1708,19 @@ def render_wrist_scene(
         ignore_dist_thres=10,
         append_to_existing_output=True,
         frames_per_chunk=args.frames_per_chunk,
+    )
+    _write_corner_visibility_sidecar(
+        args,
+        output_dataset_path,
+        target_bop_objs,
+        wrist_objs,
+        jacket_obj,
+        accepted_cam2world_mats,
+        data.get("colors"),
+        bpy,
+        np,
+        Vector,
+        Matrix,
     )
 
 
@@ -1416,6 +1807,7 @@ def main() -> int:
         "orbit_pitch_sample_mode": args.orbit_pitch_sample_mode,
         "orbit_high_pitch_prob": args.orbit_high_pitch_prob,
         "target_side_up_prob": args.target_side_up_prob,
+        "target_bottom_up_prob": args.target_bottom_up_prob,
         "target_side_up_axis": args.target_side_up_axis,
         "pair_spacing": args.pair_spacing,
         "pair_center_x": args.pair_center_x,
@@ -1424,6 +1816,10 @@ def main() -> int:
         "pair_jitter_x": args.pair_jitter_x,
         "pair_jitter_y": args.pair_jitter_y,
         "pair_jitter_z": args.pair_jitter_z,
+        "corner_visibility_enabled": args.corner_visibility_enabled,
+        "corner_ray_epsilon_m": args.corner_ray_epsilon_m,
+        "corner_debug_vis": args.corner_debug_vis,
+        "corner_debug_vis_max_frames": args.corner_debug_vis_max_frames,
         "output_dataset_path": str(args.output_dataset_path),
     }
 
